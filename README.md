@@ -1,6 +1,6 @@
 # rPPG Vitals Monitor
 
-A prototype that reads heart rate, respiratory rate, and HRV from a standard webcam — no wearables, no contact. Built as a take-home challenge for Wise AI.
+A prototype that reads heart rate, respiratory rate, and HRV from a standard webcam — no wearables, no contact.
 
 **Live demo →** `https://wise-ai-rppg.onrender.com`
 
@@ -180,8 +180,8 @@ Chunks below `SQI = 0.40` are dropped entirely. If fewer than 3 windows survive 
 ## Running locally
 
 ```bash
-git clone https://github.com/your-username/wise-ai-rppg
-cd wise-ai-rppg
+git clone https://github.com/JoshPola96/rppg-monitor.git
+cd rppg-monitor
 
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -194,8 +194,8 @@ uvicorn app:app --reload --port 8000
 **Docker (development — with auto-reload):**
 
 ```bash
-docker build -t rppg-bpm .
-docker run --rm --init -p 8080:8000 -v ${PWD}:/app rppg-bpm uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+docker build -t rppg-monitor .
+docker run --rm --init -p 8080:8000 -v ${PWD}:/app rppg-monitor uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 The `--init` flag is important on Windows — it wraps the process in `tini` so `Ctrl+C` actually terminates the container and releases the port immediately.
