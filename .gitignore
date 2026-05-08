@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 .DS_Store
-*.mp4
-*.webm
-*.mov
-*.avi
+# *.mp4
+# *.webm
+# *.mov
+# *.avi
