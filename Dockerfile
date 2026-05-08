@@ -32,6 +32,20 @@ ENV PORT=8000
 # This prevents cold-start model download in production
 RUN python -c "import rppg; rppg.Model('FacePhys.rlap')" || true
 
+# ─────────────────────────────────────────────────
+# RAM & Thread Constraints for ML Frameworks
+# ─────────────────────────────────────────────────
+# Force CPU math libraries to use exactly 1 thread
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+
+# Stop JAX/TensorFlow from pre-allocating all available memory
+ENV XLA_PYTHON_CLIENT_PREALLOCATE=false
+ENV XLA_PYTHON_CLIENT_ALLOCATOR=platform
+ENV TF_FORCE_GPU_ALLOW_GROWTH=true
+ENV TF_CPP_MIN_LOG_LEVEL=3
+
 EXPOSE $PORT
 
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1"]
