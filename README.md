@@ -1,43 +1,266 @@
 # rPPG Vitals Monitor
 
-A prototype that reads heart rate, respiratory rate, and HRV from a standard webcam — no wearables, no contact.
+Camera-based contactless heart rate, respiratory rate, and HRV from a standard webcam — no wearables, no contact.
 
-**Live demo →** `https://wise-ai-rppg.onrender.com`
-
----
-
-## What it does
-
-You point a camera at your face for 60 seconds. The system processes your video in 5-second sliding windows, extracts your pulse signal from subtle skin colour changes (remote photoplethysmography), and gives you:
-
-- **Heart rate (BPM)** — per chunk and aggregated over the full session, with SQI-weighted smoothing
-- **Respiratory rate** — extracted from the BVP waveform (reliable on ≥ 15 s windows)
-- **HRV:** SDNN, RMSSD, pNN50, LF/HF ratio, IBI
-
-Two ways to use it. Upload a pre-recorded video, or open the live stream tab and let it run directly from your webcam.
+*Note: Live cloud deployment on free tiers (like Render) is not recommended due to ML model RAM constraints. See local/Docker instructions below.*
 
 ---
 
-## The 5-second window constraint (read this first)
+## Quick Start
 
-The challenge specifies a 5-second processing window. It is important to be upfront about what signal processing can and cannot do in that time.
+**Local CLI (native pipeline, best accuracy):**
 
-| Metric | 5 s window | Why |
-|---|---|---|
-| **Heart Rate** | ✅ Estimable, volatile | 5–6 heartbeats visible at 60–70 BPM — barely enough for FFT |
-| **Respiratory Rate** | ⚠️ Unreliable | One breath takes 3–5 s; can't run frequency analysis on a single cycle |
-| **HRV SDNN / RMSSD** | ⚠️ Indicative only | Need ≥ 1–2 min for stable estimates |
-| **LF/HF ratio** | ❌ Not meaningful | LF band = 0.04–0.15 Hz; one LF wave takes 7–25 s — longer than the window |
+```bash
+git clone [https://github.com/JoshPola96/rppg-monitor.git](https://github.com/JoshPola96/rppg-monitor.git)
+cd rppg-monitor
 
-The system produces all metrics from the model's output. The HR estimate is the most trustworthy one at 5-second resolution. Respiratory and HRV values are included because the model computes them, but they should be treated as indicative rather than clinical at this window size.
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 
-The live stream UI intentionally keeps the "deeper metrics" section always visible — for a production system, the HRV fields would be hidden behind a "gathering longer context…" state until at least 30 s of clean signal has accumulated.
+python local_run.py --mode webcam
+python local_run.py --mode file --file path/to/video.mp4
+```
+
+**Browser app (Docker, headless-safe):**
+
+```bash
+docker build -t rppg-monitor .
+docker run --rm --init -p 8080:8000 rppg-monitor
+# → http://localhost:8080
+
+# With live reload during development:
+docker run --rm --init -p 8080:8000 -v ${PWD}:/app rppg-monitor \
+  uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+> The `--init` flag is required on Linux and Windows. It wraps the process in `tini` so `Ctrl+C` terminates the container immediately and releases the port rather than waiting for a forced kill timeout.
 
 ---
 
-## Sample output
+## What It Does
 
-**File upload — 60-second video, 12 chunks**
+Point a camera at your face. The system detects the subtle rhythmic colour changes in skin — the green channel brightens and dims as blood pulses through surface vessels — and extracts:
+
+* **Heart rate (BPM)** — per sliding window and SQI-weighted aggregate over the full session
+* **Respiratory rate** — extracted from the BVP waveform's low-frequency modulation
+* **HRV:** IBI, SDNN, RMSSD, pNN50, LF/HF ratio
+
+Two input paths are supported: live webcam stream (WebSocket) or file upload (POST).
+
+---
+
+## Camera and Positioning Requirements
+
+Signal quality depends almost entirely on two physical inputs the software cannot control: the light hitting your face, and your distance from the lens. The model extracts pulse from the green channel of skin pixels in the forehead and upper cheek regions. Anything that masks, shadows, or noisily modulates that channel will degrade SQI.
+
+**What works:**
+
+* Face the light source directly. A window in front of you, a lamp aimed at your face, or a bright monitor — all work. A window or bright surface behind you creates silhouette conditions that suppress the signal.
+* Sit close enough that your face fills roughly a third to half of the frame. The Haar cascade needs a minimum 80×80 pixel face detection box; once detected, the pipeline crops to 128×128 for inference.
+* Sit upright, chin level, face forward. The forehead and cheeks are the primary ROI. When the head tilts down the forehead foreshortens in the 2D frame and the brow casts shadows across the cheek — both effects reduce the pixel area the model can use.
+* Stay still. Slow postural sway is tolerated; talking, laughing, or a hand crossing the frame will be caught by the motion gate and those frames will be dropped.
+
+**What the UI does and does not tell you:**
+The SQI bar, dynamic tracking bounding box, and face-frame colour indicator give real-time signal quality feedback: green means the model has a clean lock, amber is marginal, red means the current window is too noisy to trust. Specific drop reasons (blurry, motion, no face detected, lighting out of range) are surfaced as status messages when the quality gate rejects frames.
+
+Hardcoded posture-correction overlays were considered and explicitly dropped. A guide that says "chin up" relative to a fixed pixel position would give instructions that are entirely inconsistent with the actual SQI — it cannot know whether the problem is head angle, lighting, distance, or webcam exposure drift. The tracking box dynamically projects the backend Haar cascade boundary onto the live video feed so you always know what the model is looking at, while the SQI bar and colour feedback convey real signal quality.
+
+---
+
+## Two Systems: What They Are and Why Both Exist
+
+This project has two distinct implementations that share the same model weights but differ in how they interact with the camera and the inference pipeline.
+
+### System 1 — `local_run.py` (Native Pipeline)
+
+Uses open-rppg's built-in real-time pipeline directly:
+
+```text
+Camera device
+    │
+    ▼
+model.video_capture(0)        ← opens /dev/video0 or DirectShow source
+    │
+model.preview                 ← generator: yields (frame_rgb, box) per camera frame
+    │                            library handles: face detection, ROI extraction,
+    │                            signal buffering, bandpass filter, detrending,
+    │                            quality checks
+    ▼
+model.hr(start=-WINDOW_SIZE)  ← pulls metrics from the last N seconds of
+                                 buffered signal on a timed interval
+```
+
+The library is doing everything internally. You are just reading its output. This is the gold standard: the same preprocessing that the model was trained against, applied to raw camera frames.
+File mode uses `model.process_video(path)` — a single call that handles the complete pipeline over a video file and returns one result dict for the entire clip. 
+
+*Limitation: `model.video_capture(0)` opens a physical camera device on the machine running the code. In a headless Docker container there is no camera device to open. This mode only runs locally.*
+
+### System 2 — `app.py` (Browser-based, Docker-safe)
+
+The browser is the capture device. The backend is the inference engine. The library's native pipeline is replicated manually in Python:
+
+```text
+Browser camera (getUserMedia)
+    │
+    │  JPEG frames over WebSocket (~30 fps)
+    ▼
+FastAPI /ws/stream
+    │
+    ├── cv2.imdecode (JPEG → BGR)
+    ├── Haar cascade face detection (replicates library's internal detection)
+    ├── Pad + crop → 128×128 RGB (replicates library's ROI extraction)
+    ├── FrameQualityMonitor (replicates library's quality checks)
+    │     blur (Laplacian variance), brightness, inter-frame motion
+    ├── deque(maxlen=600) rolling buffer (replicates library's signal buffer)
+    │
+    ├── Every STEP_FRAMES: np.stack → process_faces_tensor(tensor, fps) (Async)
+    │     ↑ pre-cropped tensor path — skips library's internal detection
+    │     ↑ note: "Tensor mode, video quality check disabled" fires here;
+    │       that is expected — our FrameQualityMonitor is the replacement
+    │
+    ├── Median filter (5-window, kills single-inference spikes)
+    ├── EMA smoothing (α=0.70 for HR, α=0.30 for RR)
+    └── JSON → WebSocket → browser
+```
+
+For file upload (`/analyze`), `process_video_file_sync` reads frames one by one with OpenCV, extracts 128×128 face crops, accumulates chunks of `WINDOW_FRAMES` crops, and calls `process_faces_tensor` per chunk. It never allocates a full-video tensor — critical for staying within strict memory limits:
+
+* **Full frame buffer at 640×480:** `600 × 640 × 480 × 3 = 552 MB` (OOM on free tiers)
+* **Face crop buffer at 128×128:** `600 × 128 × 128 × 3 = 37 MB` (Safe)
+
+---
+
+## Architecture
+
+```text
+Browser (Live)    JPEG canvas frames ──► WS  /ws/stream
+Browser (Upload)  <input type=file>  ──► POST /analyze
+
+                                                │
+                              ┌─────────────────▼────────────────┐
+                              │            FastAPI               │
+                              │                                  │
+                              │  /analyze                        │
+                              │  cv2.VideoCapture (frame-by-frame)│
+                              │  extract_face → 128×128 crops    │
+                              │  adaptive window (≥5s, ≤20s)     │
+                              │  ThreadPool: process_faces_tensor│
+                              │  SQI-weighted aggregate          │
+                              │                                  │
+                              │  /ws/stream  [O(1) mode]         │
+                              │  JPEG → cv2.imdecode             │
+                              │  Haar cascade + 10% pad crop     │
+                              │  FrameQualityMonitor gate        │
+                              │  deque(maxlen=600) rolling buffer│
+                              │  np.stack → process_faces_tensor │
+                              │  (Non-blocking Task)             │
+                              │  median(5) + EMA(α=0.70)         │
+                              │  → JSON back over WebSocket      │
+                              │                                  │
+                              │  FacePhys.rlap                   │
+                              │  warm in memory, threading.Lock  │
+                              └──────────────────────────────────┘
+```
+
+`local_run.py` (local only):
+
+```text
+Camera device ──► model.video_capture(0) ──► model.preview ──► model.hr(start=-20)
+```
+
+The model is loaded once at startup and held in memory behind a `threading.Lock`. Inference runs in a `ThreadPoolExecutor(max_workers=2)` via `asyncio.run_in_executor`, keeping the async event loop free during CPU-bound inference.
+
+---
+
+## Key Configuration Values
+
+| Parameter | Value | Rationale |
+| :--- | :--- | :--- |
+| **WINDOW_FRAMES** | 600 (20 s) | Narrower FFT bins — at 5 s, frequency resolution is 0.2 Hz, wide enough for adjacent BPM values to bleed into each other. 20 s gives 0.05 Hz resolution. |
+| **STEP_FRAMES** | 36 (~1.2 s) | Inference fires once per 1.2 s of new frames. Matches the `UPDATE_INTERVAL` used by `local_run.py`. |
+| **EMA_ALPHA** | 0.70 | Higher alpha = faster response. Earlier value of 0.15 meant a real HR change took ~30 s to appear in the UI. |
+| **SQI_THRESHOLD** | 0.35 | Gate for accepting an inference result. The native pipeline pre-cleans signal more aggressively, so the threshold can be lower than typical rPPG deployments. |
+| **BLUR_THRESHOLD** | 30.0 | Laplacian variance on the 128×128 face crop. Earlier value of 80.0 was rejecting clean frames. |
+| **MOTION_THRESHOLD** | 25.0 | Mean absolute inter-frame diff on face grayscale. Earlier value of 8.0 was dropping frames during normal breathing movement. |
+| **JPEG quality** | 0.5 | At quality 1.0, frames were ~410 KB each → ~12 MB/s WebSocket throughput → TCP congestion caused frames to arrive in bursts. Quality 0.5 gives ~27 KB per frame (~800 KB/s), uniform arrival cadence. |
+
+---
+
+## The Window Constraint (5s vs 20s)
+
+A 5-second processing window is often asked for in real-time specifications, but it is an honest constraint worth understanding:
+
+| Metric | 5 s window | 20 s window | Why |
+| :--- | :--- | :--- | :--- |
+| **Heart Rate** | ✅ Estimable, volatile | ✅ Stable | 5–6 beats visible at rest. FFT bins are wide (0.2 Hz) at 5 s, narrow (0.05 Hz) at 20 s. |
+| **Respiratory Rate** | ⚠️ Unreliable | ✅ Usable | One breath is 3–5 s. A single cycle is not enough for frequency analysis. |
+| **HRV SDNN / RMSSD** | ⚠️ Indicative | ⚠️ Indicative | Clinically meaningful HRV requires ≥1–2 min of clean signal. |
+| **LF/HF ratio** | ❌ Meaningless | ❌ Questionable | LF band = 0.04–0.15 Hz; one LF wave period is 7–25 s — physically longer than a 5 s window and marginal at 20 s. |
+
+The system runs with a 20-second window by default. All metrics are produced and surfaced. HR is the most trustworthy output at this window size. Respiratory rate and HRV values are real computations from the model's BVP signal, not fabricated — but they should be read as indicative rather than clinical.
+
+---
+
+## Signal Quality — The Compounding Variables
+
+* **Webcam auto-exposure is the dominant noise source.** The rPPG algorithm detects periodic green-channel fluctuations caused by blood flow through skin. A webcam's automatic exposure system adjusts overall frame brightness continuously in response to head movement, background content, and even what is displayed on a nearby monitor. To the algorithm, a hardware brightness shift is indistinguishable from a blood volume pulse. This is the primary ceiling in typical indoor setups.
+* **JPEG quality vs. arrival cadence.** This was counterintuitive. Lower-quality JPEG improves signal stability because uniform frame arrival matters more than per-pixel fidelity. The rPPG signal exists in the colour domain across time — timing regularity of frames is a prerequisite for FFT accuracy.
+* **Frame timing: requestVideoFrameCallback vs. setInterval.** `setInterval(fn, 33)` drifts against the hardware camera clock. `requestVideoFrameCallback` fires at the exact moment the camera delivers a new hardware frame. The difference is relevant because the FFT assumes uniformly-spaced temporal samples. Frame-rate jitter introduces frequency-domain noise that shows up as SQI degradation.
+* **Targeted Quality Gates.** The quality gate thresholds are applied to the face crop, not the full frame. This is deliberate. A threshold applied to the full frame will fire on background lighting changes (someone turning on a lamp across the room) that do not actually affect the face-ROI signal. By applying blur, brightness, and motion checks to the 128×128 crop, background noise cannot trigger false rejections.
+
+---
+
+## File Upload: Video Encoding Matters
+
+Standard consumer video uses inter-frame compression (H.264/H.265). Only key frames (I-frames) store complete pixel data; subsequent frames store motion deltas. rPPG depends on detecting ~1% green-channel variation across frames — compression algorithms routinely classify this as noise and discard it. The open-rppg library logs a warning when it detects non-key frames: `OPEN-RPPG:WARNING - Detected non-key frames, this will damage the rPPG signal.`
+
+For best results with file upload, transcode the video to an all-intra stream before uploading:
+
+```bash
+# Install ffmpeg if not available:
+pip install ffmpeg-downloader
+ffdl install
+
+# Transcode (forces every frame to be a keyframe at constant 30 fps):
+ffmpeg -i input.mp4 \
+       -c:v libx264 \
+       -x264-params "keyint=1" \
+       -r 30 \
+       -pix_fmt yuv420p \
+       input_fixed.mp4
+```
+
+On Windows, if ffmpeg is not on PATH after installation:
+
+```powershell
+# Add to session PATH:
+$env:Path += ";C:\Users\<user>\AppData\Local\ffmpegio\ffmpeg-downloader\ffmpeg\bin"
+
+# Or call directly with full path:
+& "C:\Users\<user>\AppData\Local\ffmpegio\ffmpeg-downloader\ffmpeg\bin\ffmpeg.exe" `
+    -i input.mp4 -c:v libx264 -x264-params "keyint=1" -r 30 -pix_fmt yuv420p input_fixed.mp4
+```
+
+A well-encoded I-frame-only video will eliminate the non-key frames warning and typically raise SQI from the 18–40% range to 60–80%+. The browser live stream path does not have this problem because it captures raw canvas frames before any compression is applied.
+
+---
+
+## SQI-Weighted Aggregation
+
+A plain average across chunks does not hold up when a single window has a lighting change or motion burst. The Signal Quality Index measures how clean the extracted BVP signal is for that window. Every metric is weighted by it:
+
+```text
+final_bpm = Σ(bpm_i × sqi_i) / Σ(sqi_i)
+```
+
+Chunks below `SQI = 0.35` are excluded entirely. For short videos (shorter than the 20-second ideal window), the window size shrinks adaptively down to a 5-second minimum (150 frames) so that something useful is returned rather than an error.
+
+---
+
+## Sample Output
+
+**File upload — 60-second video:**
 
 ```json
 {
@@ -45,7 +268,7 @@ The live stream UI intentionally keeps the "deeper metrics" section always visib
     {
       "chunk_index": 0,
       "time_start_s": 0.0,
-      "time_end_s": 5.0,
+      "time_end_s": 20.0,
       "bpm_fft": 74.3,
       "bpm_peak": 73.8,
       "sqi": 0.7841,
@@ -66,15 +289,15 @@ The live stream UI intentionally keeps the "deeper metrics" section always visib
     "agg_hrv_sdnn": 40.7,
     "agg_hrv_rmssd": 37.2,
     "agg_hrv_lf_hf": 1.38,
-    "chunks_total": 12,
-    "chunks_valid": 10,
+    "chunks_total": 3,
+    "chunks_valid": 3,
     "total_time_ms": 14820.0,
     "message": "OK"
   }
 }
 ```
 
-**Live stream** — WebSocket emits this every ~0.5 s of new data:
+**Live stream — WebSocket emits this every ~1.2 s of new frames:**
 
 ```json
 {
@@ -89,132 +312,126 @@ The live stream UI intentionally keeps the "deeper metrics" section always visib
   "hrv_rmssd": 38.4,
   "hrv_pnn50": 21.3,
   "hrv_lf_hf": 1.38,
-  "buffered_frames": 150
+  "buffered_frames": 600,
+  "box": [245, 120, 160, 160]
 }
 ```
 
----
+**WebSocket status values:**
 
-## Stack
-
-- **Model:** [open-rppg](https://github.com/KegangWangCCNU/open-rppg) — `FacePhys.rlap`, a state-space model trained on the RLAP benchmark
-- **Backend:** FastAPI + uvicorn, Python 3.11
-- **Media decoding:** OpenCV (file upload), base64 canvas frames (live stream)
-- **Frontend:** plain HTML/JS — no framework, no build step
-- **Deployment:** Docker → Render
-
----
-
-## Architecture
-
-```
-Browser (Live)    JPEG canvas frames  ──► WS  /ws/stream
-Browser (Upload)  <input type=file>   ──► POST /analyze
-                                                │
-                                   ┌────────────▼──────────────┐
-                                   │         FastAPI            │
-                                   │                            │
-                                   │  /analyze                  │
-                                   │  OpenCV decode once        │
-                                   │  → (T,H,W,3) tensor        │
-                                   │  Non-overlap windows       │
-                                   │  ThreadPool: run_model     │
-                                   │  → SQI-weighted aggregate  │
-                                   │                            │
-                                   │  /ws/stream  [O(1) mode]   │
-                                   │  JPEG → cv2.imdecode       │
-                                   │  FrameQualityMonitor gate  │
-                                   │  deque(maxlen=150)         │
-                                   │  np.stack → run_model      │
-                                   │  Median + EMA smooth       │
-                                   │  → stream JSON back        │
-                                   │                            │
-                                   │  FacePhys.rlap             │
-                                   │  warm in memory, locked    │
-                                   └────────────────────────────┘
-```
-
-The model is loaded once at startup and held in memory behind a `threading.Lock`. Inference runs in a `ThreadPoolExecutor` via `asyncio.run_in_executor`, so the event loop stays free while a chunk is processing.
+| Status | Meaning |
+| :--- | :--- |
+| `buffering` | Filling the 20-second initial window. buffered and target fields show progress. |
+| `low_signal` | Frame dropped by quality gate. reason: blurry / motion / no_face / lighting. |
+| `ok` | Full metrics payload — SQI gate passed. |
+| `no_signal` | Model returned no HR estimate this window. |
+| `error` | Inference failure. Check detail field. |
 
 ---
 
-## Why SQI-weighted aggregation
+## Browser vs. Native: Empirical Comparison (Lab vs. Wild)
 
-A plain average across 12 chunks doesn't hold up when even one window has a lighting change or motion. The Signal Quality Index the model returns measures how clean the extracted pulse signal is for that window. Every metric is weighted by it:
+This comparison is a perfect "lab vs. wild" case study. While the core logic is successfully replicated in the browser architecture, empirical data reveals exactly where the web architecture pays a "tax" compared to the native implementation.
 
-```
-final_bpm = Σ(bpm_i × sqi_i) / Σ(sqi_i)
-```
+| Metric | Browser (Custom via app.py) | Native (Direct via local_run.py) | Observation |
+| :--- | :--- | :--- | :--- |
+| **Live HR Accuracy** | ~61.1 – 62.7 BPM | ~61.8 BPM (Avg) | Parity. The core math is identical. |
+| **File HR Accuracy** | 73.9 BPM | 73.3 BPM | Parity. < 1 BPM difference on the same file. |
+| **SQI (Quality)** | ~53% – 64% | ~82.8% | Native Wins. Browser compression hurts signal. |
+| **File Process Time** | 13.46 seconds | 2.54 seconds | Native Wins. Massive overhead in the web loop. |
+| **Inference Latency** | ~1800ms | ~1100ms (est) | Native Wins. Web involves JPEG/Base64 overhead. |
 
-Chunks below `SQI = 0.40` are dropped entirely. If fewer than 3 windows survive that cut, the system says so rather than returning a number that looks credible but isn't.
+1. **The "Compression Tax" (SQI Gap):** Native SQI (~82.8%) is significantly higher than Browser SQI (~53-64%). In `index.html`, frames are sent as `image/jpeg` at 0.5 quality to save bandwidth. rPPG relies on detecting minute color changes (often in the 8-bit noise floor). JPEG compression "smooths" these colors to save space, effectively deleting the very signal the model is looking for.
+2. **The Loop Overhead (Processing Time):** Native `model.process_video` finished in 2.54s, while the Browser `POST /analyze` took 13.46s. The Native library uses a highly optimized pre-compiled C++/CUDA pipeline pulling frames directly into a buffer. The browser backend has to save the file, open it with OpenCV, run a Python loop, execute a Haar Cascade on every single frame, and use `np.stack` to create tensors. This "Python tax" and per-frame detection adds nearly 11 seconds of latency for a 12-second video.
+3. **Heart Rate Consistency:** The good news is that the FFT (Fast Fourier Transform) results are incredibly stable across both. Both versions landed within 0.6 BPM of each other on static files, and within ~1 BPM on live webcams. The custom face-cropping and tensor-stacking logic is mathematically sound.
 
----
-
-## Performance
-
-| Stage | Typical time (CPU) |
-|---|---|
-| OpenCV decode, 60 s video | 300–600 ms |
-| Inference per 5 s window | 450–520 ms |
-| Aggregation (12 chunks) | < 5 ms |
-| Full 60 s file analysis | 14–22 s |
-| Live stream update cadence | ~0.5 s per reading |
-| Effective inference speed | ~290–330 FPS equivalent |
+**Conclusion:** Native is the "Gold Standard" for accuracy and speed. However, for a remote monitoring tool, a 1.8s delay and a 15% drop in SQI is a fair trade for the ability to run in a web browser. Note that HRV metrics (SDNN/RMSSD) are much more sensitive to the JPEG compression "jittering" the peak detection, making web HRV less reliable than native and the browser based implementation can be improved with further iterations.
 
 ---
 
-## Failure cases worth knowing about
+## Failure Cases
 
-**Lighting changes.** A bright flash or window glare can oversaturate the green channel for a frame or two. The `FrameQualityMonitor` gates these frames out before they enter the sliding buffer, but a sustained change (someone turning a light on) will still depress SQI for several windows until the EMA adapts.
-
-**Webcam auto-exposure.** Most webcams continuously adjust brightness frame by frame. To the rPPG algorithm, a hardware brightness shift looks identical to a massive blood volume pulse. This is the primary driver of SQI fluctuation in normal indoor use. A ring light or sitting directly facing a bright window (not behind you) dramatically reduces this. Disabling auto-exposure via `getUserMedia` constraints is possible in theory but browser/hardware support is too inconsistent to rely on.
-
-**Motion.** Slow head movement is fine — the model handles it. Talking, laughing, or a hand in front of your face will cause signal degradation in that window. The quality monitor's motion gate (mean absolute frame diff > 25.0) catches abrupt movement and drops those frames.
-
-**Short windows and HRV.** See the 5-second window constraint table at the top. SDNN and RMSSD are real values derived from the model's BVP signal analysis. LF/HF is present in the output but should not be interpreted at this window size.
-
-**Variable frame rate.** For file upload, we read actual source FPS from OpenCV (`CAP_PROP_FPS`) and size windows accordingly, so the FFT frequency mapping stays accurate. For live streaming, we assume the camera delivers at ~30 fps — a production system would timestamp each frame and adjust.
+* **Lighting changes:** A bright flash or window glare oversaturates the green channel. The `FrameQualityMonitor` catches abrupt brightness changes, but a sustained change (someone turning a lamp on in the background) will depress SQI for several windows until the EMA adapts. Front-facing diffuse light eliminates this class of failure.
+* **Webcam auto-exposure:** The primary ceiling in normal indoor use. See the signal quality section above. A ring light or facing a bright window reduces this significantly. Sitting in a dark room with only a monitor as the light source is the worst-case scenario — the monitor content change triggers continuous auto-exposure adjustment.
+* **Motion:** Slow head movement and normal breathing are tolerated. Talking, laughing, or a hand in front of the face will degrade SQI for that window. The motion gate catches abrupt movement and drops those frames from the buffer.
+* **Short windows and HRV:** SDNN, RMSSD, and LF/HF are produced from the model's BVP signal analysis. They are real values from the algorithm, not estimates — but at 20-second windows they should be read as indicative. Clinical HRV analysis uses 5-minute recordings as a minimum.
+* **Variable frame rate (file upload):** The pipeline reads actual source FPS from OpenCV (`CAP_PROP_FPS`) and sizes windows accordingly, so FFT frequency mapping stays accurate regardless of recording FPS. For live streaming, 30 fps is assumed from the camera — a production system would timestamp each frame individually.
+* **Short uploads:** If a video is shorter than the 20-second ideal window, the window shrinks adaptively to fit. Absolute floor is 5 seconds (150 frames). Below that, inference is refused with a descriptive error rather than returning a number that looks credible but is based on too little signal.
 
 ---
 
-## Running locally
+## Running Locally: Full Command Reference
 
 ```bash
-git clone https://github.com/JoshPola96/rppg-monitor.git
+# Clone and set up environment
+git clone [https://github.com/JoshPola96/rppg-monitor.git](https://github.com/JoshPola96/rppg-monitor.git)
 cd rppg-monitor
 
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+# ── Native CLI ───────────────────────────────────────────────────────────────
+
+# Live webcam (default model: FacePhys.rlap)
+python local_run.py --mode webcam
+
+# Live webcam with alternate model
+python local_run.py --mode webcam --model PhysMamba.pure
+
+# Single video file analysis
+python local_run.py --mode file --file path/to/video.mp4
+
+# File analysis with alternate model
+python local_run.py --mode file --file path/to/video.mp4 --model EfficientPhys
+
+# Press Q in the preview window to exit cleanly.
+# Ctrl+C also works. 
+
+# ── Browser App (local, no Docker) ──────────────────────────────────────────
 
 uvicorn app:app --reload --port 8000
 # → http://localhost:8000
-```
 
-**Docker (development — with auto-reload):**
+# ── Browser App (Docker) ─────────────────────────────────────────────────────
 
-```bash
+# Build image
 docker build -t rppg-monitor .
-docker run --rm --init -p 8080:8000 -v ${PWD}:/app rppg-monitor uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+# Run (production mode)
+docker run --rm --init -p 8080:8000 rppg-monitor
+
+# Run with live reload (development — mounts local directory)
+docker run --rm --init -p 8080:8000 -v ${PWD}:/app rppg-monitor \
+  uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+# Windows PowerShell (use ${PWD} or full path):
+docker run --rm --init -p 8080:8000 -v ${PWD}:/app rppg-monitor `
+  uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+# Check container health
+curl http://localhost:8080/health
+
+# Stop container (Ctrl+C, or from another terminal):
+docker ps                          # find CONTAINER_ID
+docker stop <CONTAINER_ID>
 ```
 
-The `--init` flag is important on Windows — it wraps the process in `tini` so `Ctrl+C` actually terminates the container and releases the port immediately.
+> The `--init` flag is critical. Without it, Docker runs uvicorn as PID 1 with no signal handler. `Ctrl+C` sends SIGTERM to the container, which is ignored by a PID-1 process without explicit handling. The container then waits 10 seconds before sending SIGKILL. `--init` inserts `tini` as PID 1, which correctly propagates SIGTERM to uvicorn and exits immediately. The Dockerfile's `CMD` uses `exec` form (not `sh -c` shell form) for the same reason — shell-wrapped processes do not receive signals.
 
 ---
 
-## Deploying to Render
+## Deployment (Informational Note on Render)
 
-Push to GitHub. New Web Service → Docker runtime → connect repo. `render.yaml` is auto-detected, health check runs at `/health`.
-
-The Dockerfile pre-bakes model weights at build time so there's no cold-start download in production:
+If deploying to a cloud platform like Render, a standard web service with a Docker runtime works well. Render will auto-deploy upon GitHub push. The Dockerfile pre-bakes model weights at build time so there is no cold-start download in production:
 
 ```dockerfile
 RUN python -c "import rppg; rppg.Model('FacePhys.rlap')" || true
 ```
 
-The `CMD` uses `exec` (not `sh -c`) so Render's shutdown signal goes directly to uvicorn rather than being swallowed by the shell, enabling graceful draining.
+The `|| true` prevents the build from failing if the model download has a transient network error — it will re-download at first request instead.
 
-One thing to watch: Render's free tier spins down inactive services. A WebSocket handshake against a sleeping instance will fail. Either set the service to always-on, or handle reconnect on the client.
+**Note:** Cloud providers' free tiers spin down inactive services. A WebSocket handshake against a sleeping instance will fail at the TLS layer before the app receives it. Either set the service to always-on, or implement reconnect logic on the frontend (the `ws.onclose` handler in `index.html` calls `stopStream()` on unexpected disconnect — for auto-reconnect, that handler would instead call `startStream()` after a short delay).
 
 ---
 
@@ -222,110 +439,131 @@ One thing to watch: Render's free tier spins down inactive services. A WebSocket
 
 ### `POST /analyze`
 
-Upload a video file for chunk-level and aggregate analysis.
+Upload a video for chunk-level and aggregate analysis.
 
-**Request:** `multipart/form-data`, field `file`. Accepts `.mp4 .webm .mov .avi .mkv`.  
-**Response:** `{ chunks: ChunkMetrics[], aggregate: AggregateResult }`
+* **Request:** `multipart/form-data`, field `file`. Accepts `.mp4 .webm .mov .avi .mkv`. Minimum 5 seconds.
+* **Response:**
+  ```json
+  {
+    "chunks":    ChunkMetrics[],
+    "aggregate": AggregateResult
+  }
+  
+```
+* **Error codes:** 400 (file too small), 415 (unsupported format), 422 (no signal extracted or video too short)
 
 ### `WS /ws/stream`
 
-Send JPEG data-URLs from a canvas element. Receive JSON per inference window.
-
-| Status | Meaning |
-|---|---|
-| `buffering` | Filling the initial 150-frame window, not enough data yet |
-| `low_signal` | Frame dropped by quality gate (`reason`: blurry / motion / lighting) or SQI below threshold |
-| `ok` | Full metrics payload |
-| `no_signal` | Model returned no HR estimate |
-| `error` | Inference failure, check `detail` field |
+Send JPEG data-URLs from a canvas element. Receive JSON per inference window. See status values table above.
 
 ### `GET /health`
 
 ```json
-{ "status": "ok", "model": "FacePhys.rlap", "target_fps": 30, "window_s": 5.0 }
+{
+  "status": "ok",
+  "model": "FacePhys.rlap",
+  "inference": "process_faces_tensor",
+  "target_fps": 30,
+  "window_s": 20.0,
+  "face_size": 128
+}
 ```
 
 ---
 
-## The engineering journey
+## Stack
 
-Wise AI asked how I used AI tools. The honest answer involves going down several wrong paths and having to reason my way out of them, so I'm writing it as a story.
-
-### Version 1 — the bug that ate the first implementation
-
-The initial approach: `MediaRecorder` with a 250 ms timeslice, send each blob over WebSocket, decode each blob with PyAV, accumulate frames, fire inference every 5 seconds. This produced exactly one reading and then nothing.
-
-The problem took time to find. Browser `MediaRecorder` with `timeslice` only writes the WebM EBML container header into the very first blob. Every blob after that is a raw VP8 media segment — technically an incomplete file. PyAV can't parse it in isolation. It returns an empty frame list without throwing an error. The buffer never filled past the first window.
-
-The fix at that stage: accumulate all bytes from the start of the session into one growing buffer and pass the entire thing to PyAV on each decode. You always have the EBML header because it was blob zero. This worked, but it was O(n) — at second 50 the server was decoding 50 seconds of video just to extract the last 150 frames.
-
-### Version 2 — the performance cliff
-
-Once the byte-accumulation approach was stable, a new problem appeared in the logs. Inference gaps that were 1 second at session start were 3+ seconds by minute one. The loop was falling behind real-time.
-
-Cause: `decode_video_bytes(full_accumulated_buffer)` is not a constant-time operation. It grows linearly with session length. 250 ms × 30 fps × 50 s = a lot of bytes to hand PyAV on every step.
-
-### Version 3 (current) — O(1) frame mode
-
-The architectural shift: stop treating frames as a transport problem and treat them as a data problem. Instead of accumulating compressed video fragments and decoding them repeatedly, extract raw frames on the frontend and send them individually.
-
-Frontend: `requestVideoFrameCallback` draws each hardware-synchronized camera frame onto a hidden canvas and sends it as a base64 JPEG over the WebSocket. Backend: `deque(maxlen=150)` automatically discards the oldest frame on each new arrival. When inference fires, `np.stack(frame_buffer)` builds the tensor from exactly 150 frames. Memory is flat. Decode cost is flat. This holds at any session length.
-
-### Signal quality — the compounding variables
-
-After the architecture was stable, SQI was still fluctuating between 0.19 and 0.74 in the same session under apparently unchanged conditions. Working through the variables:
-
-**JPEG quality mattered more than expected.** Initially quality was set to 1.0 (lossless) on the theory that the micro-color changes needed maximum fidelity. Testing showed that high-quality JPEGs at 640×480 are ~410 KB per frame. At 30 fps that's ~12 MB/s over the WebSocket. TCP congestion caused 2–3 frames to arrive at the server simultaneously, then a gap. To the rPPG model, that timing irregularity looks like a heartbeat event. Dropping quality to 0.5 reduced frame size to ~27 KB (~800 KB/s) and the arrival cadence became uniform.
-
-**Frame timing matters as much as frame content.** Using `setInterval` at 33 ms introduces drift against the hardware camera clock. `requestVideoFrameCallback` fires at the exact moment the camera delivers a new frame, eliminating that drift entirely.
-
-**Webcam auto-exposure is the dominant noise source indoors.** The model extracts heart rate by detecting periodic colour fluctuations in the green channel of facial skin. A webcam's automatic exposure system is continuously adjusting overall frame brightness in response to head movements, background changes, and monitor content. To the algorithm, a hardware brightness shift is indistinguishable from a large blood volume pulse. This is the primary ceiling at typical indoor setups. The `FrameQualityMonitor` catches abrupt changes (sudden motion, blurring) but cannot compensate for gradual exposure drift, which the model interprets as signal noise.
-
-**The quality monitor thresholds needed calibration.** Early values (blur threshold 80, motion threshold 8) were too aggressive — they were rejecting clean frames. The final values (blur 30, motion 25) gate genuinely bad frames while passing normal slight head movement.
-
-### Bugs resolved across the session
-
-Six iterations of concrete bugs were caught and fixed, mostly through reading the actual error rather than the expected error:
-
-`Object of type float32 is not JSON serializable` — the WebSocket `send_json` uses the stdlib encoder, which doesn't know NumPy types. FastAPI's HTTP endpoints go through Pydantic, which does. The `make_serializable` recursive utility handles this by walking the entire payload dict and converting all NumPy primitives before the encoder sees them.
-
-`Unexpected token 'N' … NaN is not valid JSON` — `heartpy` returns `float('nan')` (standard Python NaN) when it fails to find peaks in a noisy signal. The stdlib encoder writes `NaN` which is valid JavaScript but not valid JSON. `make_serializable` now also checks `math.isnan` and `math.isinf` on standard floats.
-
-`'<' not supported between instances of 'NoneType' and 'float'` — the fatal crash visible at the end of the latest log session. `result.get("SQI", 0.0)` does not return the default when the model explicitly sets `SQI: None` — Python's `dict.get` only uses the default for absent keys. The fix is `result.get("SQI") or 0.0`, which evaluates `None` as falsy and substitutes zero.
-
-`unsupported format string passed to NoneType.__format__` — `heartpy` occasionally returns `{"hr": None}` on a complete signal failure. The metrics logger was calling `:.1f` on that value. Fixed by guarding with `float(x) if x is not None else 0.0`.
-
-The duplicate frame append (from an incomplete merge of a reviewed patch) was filling the deque with duplicate frames — the buffer looked full but contained only half the unique time coverage.
-
-The Dockerfile `CMD` used `sh -c` wrapper, which swallowed SIGTERM on container shutdown and caused 10-second forced kills. Replaced with `exec uvicorn ...` so the process is PID 1 and handles signals directly.
-
-### How AI was used — and where it hits its ceiling
-
-I used Claude and Gemini throughout this build as a combination of junior researcher, knowledge retrieval layer, and code generator. I want to be specific about what that actually looked like rather than just saying "AI helped."
-
-**What AI is genuinely good at here.** Drafting structural scaffolding fast — the FastAPI app skeleton, Pydantic schemas, WebSocket endpoint boilerplate, Dockerfile, frontend JS — all of that came out of AI-assisted generation and then got shaped through iteration. When I needed to understand the open-rppg library's `process_video_tensor` interface or PyAV's container format expectations, AI was a faster first-pass reference than reading raw source. For reasoning through design tradeoffs — O(1) frame deque vs byte accumulation, EMA vs median smoothing, why SQI-weighting is preferable to a plain average — AI is a capable thought partner. It holds the context of a conversation well and helps stress-test ideas.
-
-**What AI cannot do.** Run the code. Every bug in this build was found in a terminal or a browser log, not in conversation. AI reviewed the same code that had the `dict.get` / explicit `None` crash and did not catch it — because catching it requires actually executing the inference path against a model that returns `{"SQI": None}` on a complete signal failure, then reading the traceback. AI consistently proposed fixes to symptoms rather than causes until the actual stack trace was pasted in. Once it saw the error text, it identified the root cause immediately — but that's pattern matching on known error strings, not understanding the execution path.
-
-The failures that required the most judgment were all the same class of problem: assuming that a mental model of how something works matches how it actually behaves at runtime. The PyAV blob header issue looked fine on paper — of course you accumulate fragments and decode them. It failed silently. The `dict.get` default looked fine — of course it falls back to `0.0`. It didn't when the value was explicitly `None`. `setInterval` at 33 ms looks like 30 fps. It isn't when the system is under load. None of these were visible in code review, AI-assisted or otherwise.
-
-**The 5-second window — a deliberate challenge.** The task specifies a 5-second processing window, and I believe this is intentional. It is a constraint that forces you to understand what the algorithm actually measures rather than just wiring up an API call. At 5 seconds you get 5–6 heartbeats at a resting rate. The FFT frequency resolution at 5 seconds is 0.2 Hz — wide enough that adjacent BPM values become hard to distinguish. Respiratory rate needs at least one full breath cycle (3–5 seconds), which means you can only ever sample a single cycle in the window — not enough for frequency analysis. LF/HF ratio requires the Low Frequency band (0.04–0.15 Hz), whose period is 7–25 seconds — physically longer than the window. When AI was asked to extract all these metrics from 5-second chunks it did so without flagging any of this. It generated the code, the schemas, the aggregation logic. Recognising that respiration and HRV figures from a 5-second window are not reliable in any clinical sense — and documenting that honestly rather than just displaying the numbers — was a judgment call that required understanding the signal processing, not generating code for it.
-
-**What the iteration cycle actually looked like.** A rough split: AI generated the initial structure and most of the boilerplate (~70% of lines written), I made the architectural decisions, debugged every failure against live logs, calibrated every threshold (blur, brightness, motion, SQI gate, EMA alpha) empirically against my own face and webcam, and decided what to discard from AI suggestions when they conflicted with what the logs were showing. Several AI-suggested "fixes" during the signal quality phase were solving the wrong problem — proposing code changes when the actual issue was lighting and webcam hardware. Identifying that distinction required running the system, not reviewing it.
+* **Model:** open-rppg — `FacePhys.rlap`, a state-space model trained on the RLAP benchmark
+* **Backend:** FastAPI + uvicorn, Python 3.11
+* **Face detection:** OpenCV Haar cascade (frontal face, bundled with opencv-python-headless)
+* **Media decoding:** OpenCV VideoCapture (file upload), base64 JPEG over WebSocket (live stream)
+* **Frontend:** plain HTML/JS — no framework, no build step
+* **Deployment:** Docker
 
 ---
 
-## What would come next
+## The Engineering Journey
 
-**Face crop on the client side.** A lightweight face detector (MediaPipe via WebAssembly) cropping to the forehead/cheek ROI before transmission would reduce frame payload size and improve signal quality by cutting background noise from the input.
+What follows is an account of the actual development sequence, including the wrong turns.
 
-**Frame-level timestamping.** The current pipeline assumes frames arrive at exactly TARGET_FPS. Attaching a monotonic timestamp to each frame and using it to build the time axis for FFT would make the frequency mapping accurate under variable camera frame rates.
+### Version 1 — The Bug That Ate the First Implementation
 
-**Stateful inference.** Each 5-second window is currently independent. A model that carries BVP signal history across windows would give more stable HRV estimates and a faster time to first reliable reading.
+Initial architecture: `MediaRecorder` with a 250 ms timeslice, blobs sent over WebSocket, decoded with PyAV on the backend, frames accumulated, inference every 5 seconds.
+*This produced exactly one reading and then nothing.*
 
-**Concurrency.** The current `ThreadPoolExecutor(max_workers=2)` is a single-server constraint. Proper multi-user deployment would separate the FastAPI ingest layer from compute and push inference to a worker queue.
+The problem: browser `MediaRecorder` with timeslice only writes the WebM EBML container header into the very first blob. Every blob after that is a raw VP8 media segment — technically an incomplete file. PyAV requires the container header to initialise its demuxer. It cannot parse a bare media segment in isolation, and it returns an empty frame list without throwing an error. The buffer never filled past the first window. The logs looked normal. The silence was the only signal something was wrong.
+Fix at that stage: accumulate all bytes from session start into one growing buffer and pass the entire thing to PyAV on each decode. This works because blob zero always contains the EBML header. It produced valid results.
+
+### Version 2 — The Performance Cliff
+
+Once byte-accumulation was stable, a new problem appeared: inference gaps that were 1 second at session start were 3+ seconds by minute one. The loop was falling behind real-time.
+Cause: `decode_video_bytes(full_accumulated_buffer)` is not constant-time. It grows linearly with session length. At 50 seconds in, the server was decoding 50 seconds of video just to extract the last few seconds of frames. The PyAV call was the bottleneck, not the model inference.
+This is the $O(n)$ problem: accumulated bytes × decode cost × inference frequency = a wall that arrives around the 30–40 second mark for typical bitrates.
+
+### Version 3 — O(1) Frame Mode (Current Architecture)
+
+The architectural shift: stop treating frames as a transport problem and treat them as a data problem.
+Instead of accumulating compressed video fragments and repeatedly decoding them, extract raw frames on the frontend and send them individually. The deque on the backend automatically discards frames older than the window. Memory and compute are flat regardless of session length.
+
+* **Frontend:** `requestVideoFrameCallback` draws each hardware-synchronised camera frame onto a hidden canvas and sends it as a base64 JPEG.
+* **Backend:** `deque(maxlen=600)` discards the oldest frame on each new arrival. When inference fires, `np.stack(frame_buffer)` builds the tensor from exactly the most recent 600 frames.
+
+### The Async Inference Backpressure Trap (Bug Fix)
+
+In the live stream, a severe bug was discovered where the WebSocket stream automatically closed after a few seconds. The cause was an inference speed (~1400-1800ms) and camera stream accumulation step (~1200ms) mismatch. Because they were running sequentially in the async handler, frames piled up in memory, backpressure built, and Python eventually killed the connection.
+
+The fix was to decouple frame ingestion from inference. Inference is now offloaded to a non-blocking `asyncio.create_task`. If an inference cycle is still running when the next 1.2s step arrives, the app simply skips the UI update cycle and continues receiving frames rather than queuing a blocking operation, keeping memory perfectly flat.
+
+### Signal Quality — The Compounding Variables
+
+After the architecture was stable, SQI was still fluctuating between 0.19 and 0.74 in the same session under apparently unchanged conditions. Working through the variables one by one:
+
+* **JPEG quality** mattered in the opposite direction from what was expected. Initial quality was set to 1.0 on the theory that micro-colour changes need maximum fidelity. High-quality JPEGs at 640×480 are ~410 KB per frame. At 30 fps that is ~12 MB/s over the WebSocket. TCP congestion caused 2–3 frames to arrive simultaneously, then a gap. To the rPPG model, irregular frame timing looks like heartbeat events in the frequency domain. Dropping quality to 0.5 reduced frame size to ~27 KB (~800 KB/s) and arrival cadence became uniform. SQI stabilised.
+* **Frame timing.** `setInterval` at 33 ms introduces drift against the hardware camera clock under any CPU load. `requestVideoFrameCallback` fires at the exact moment the camera delivers a new hardware frame. The difference is not visible to the eye but is meaningful to an FFT expecting uniformly-spaced temporal samples.
+* **Quality gate thresholds** needed empirical calibration. Initial blur threshold of 80.0 (Laplacian variance) was rejecting clean frames — the face crop at 128×128 has a naturally lower Laplacian variance than a full HD frame. Initial motion threshold of 8.0 was dropping frames during normal breathing movement. Final values (blur 30.0, motion 25.0) gate genuinely bad frames while passing normal slight movement.
+
+### Bounded Face Tracking UI
+
+To give users confidence that the system hasn't frozen when inference lags or drops frames, a dynamic tracking box was added to the frontend. It projects the server-side Haar cascade boundary onto the live video feed. This ensures the bounding box continuously tracks the face even when the signal quality drops to amber or red, providing immediate visual feedback.
+
+### Webcam Mode — The Exit Crash
+
+The `RuntimeError: cannot join current thread` that fires on exit from the native webcam mode is a thread-cleanup bug in the `open-rppg` library itself. When exiting the `model.video_capture(0)` block, the context manager attempts to join the library's internal capture threads. However, a background thread (`Thread-3`) tries to `join()` itself during cleanup.
+
+Because this happens inside a separate background thread, it bypasses the main thread's `try...except` block entirely and prints an ugly stack trace directly to `stderr` right after the session summary prints. To get a completely clean exit, this can be fixed by intercepting unhandled thread exceptions globally using `threading.excepthook` to selectively mute this specific exception.
+
+### Bugs Resolved Across the Session
+
+* **`Object of type float32 is not JSON serializable`** — FastAPI HTTP endpoints go through Pydantic, which handles NumPy types natively. The WebSocket `send_json` uses the stdlib encoder, which does not. The `make_serializable` utility recursively walks the payload dict and converts all NumPy primitives before the encoder sees them.
+* **`Unexpected token 'N' … NaN is not valid JSON`** — `heartpy` returns `float('nan')` (standard Python NaN) when it fails to find peaks in a noisy signal. The stdlib encoder writes `NaN` which is valid JavaScript but not valid JSON. `make_serializable` now checks `math.isnan` and `math.isinf` on standard Python floats and substitutes `0.0`.
+* **`'<' not supported between instances of 'NoneType' and 'float'`** — `result.get("SQI", 0.0)` does not return the default when the model explicitly sets `SQI: None`. Python's `dict.get` only uses the default for absent keys, not for explicitly-set `None` values. The fix is `result.get("SQI") or 0.0`, which evaluates `None` as falsy.
+* **`unsupported format string passed to NoneType.__format__`** — `heartpy` occasionally returns `{"hr": None}` on complete signal failure. The metrics formatter was calling `:.1f` on that value. Fixed by guarding every extraction.
+* **Duplicate frame append** — An incomplete merge of a reviewed patch resulted in `frame_buffer.append(face_rgb)` being called twice per frame. The buffer looked full but contained only half the unique time coverage, giving the model a signal that pulsed at half the real frequency.
+* **Dockerfile CMD used `sh -c` wrapper** — `sh -c "uvicorn app:app ..."` is the parent process. SIGTERM goes to `sh`, which does not propagate it to uvicorn. The container waited 10 seconds for the forced SIGKILL on every shutdown. Replaced with `exec` form.
+* **The 422 Unprocessable Entity on file upload** — After switching to a 20-second window (`WINDOW_FRAMES=600`), short test videos (under 20 seconds) produced zero chunks because the pipeline required a full 600-frame window before running inference. Fixed with adaptive windowing.
+
+### Video Encoding — The I-frame Discovery
+
+Early file upload tests returned SQI values in the 18–21% range with a consistent library warning: `OPEN-RPPG:WARNING - Detected non-key frames, this will damage the rPPG signal.`
+Standard H.264/H.265 video uses inter-frame compression. Only I-frames (keyframes) contain complete pixel data; P-frames and B-frames store motion vectors and deltas. The rPPG signal exists as a ~1% variation in the green channel across frames. Inter-frame compression routinely classifies this as noise and discards it. Transcoding to an all-intra stream forces every frame to be a complete image, raising SQI to 60–80%+. The live stream path avoids this completely because Canvas JPEG frames sent over WebSocket are individually complete images with no inter-frame compression.
+
+### How AI Was Used
+
+LLMs (Claude and Gemini) were used throughout as a combination of research layer, code scaffolding generator, and debugging thought partner.
+
+* **What AI is genuinely good at here:** Structural scaffolding — FastAPI app skeleton, Pydantic schemas, WebSocket endpoint boilerplate, Dockerfile, frontend JS — all generated fast and iterated from there. When reasoning through design tradeoffs — O(1) deque vs. byte accumulation, EMA vs. median smoothing — AI holds context well and stress-tests ideas quickly.
+* **What AI cannot do:** Run the code. Every bug in this build was found in a terminal or a browser log. AI reviewed the same code containing the `dict.get` / explicit `None` crash and did not catch it — because catching it requires executing the inference path against a model that actually returns `{"SQI": None}`. Once it saw the error text, it identified the root cause immediately — that is pattern matching on known error strings, not understanding the execution path.
+* **The 5-Second Window Calibration:** Working with a 5-second window acts as an excellent signal processing stress test. At 5 seconds you get 5–6 heartbeats at resting rate. FFT frequency resolution at 5 seconds is 0.2 Hz — wide enough that adjacent BPM values bleed into each other. Respiratory rate requires at least one full breath cycle (3–5 s) to measure a frequency. LF/HF ratio requires the low-frequency band (0.04–0.15 Hz), whose period is 7–25 seconds. When asked to extract all these metrics from 5-second chunks, AI generated the code, the schemas, and the aggregation logic without flagging the math logic. Recognising that respiratory and HRV figures from a 5-second window are not reliable required understanding the signal processing — not generating code for it.
+
+Approximate split: AI generated the initial structure and most of the boilerplate (~70% of lines written). Architectural decisions, all debugging against live logs, all threshold calibration (blur, brightness, motion, SQI gate, EMA alpha) against a real face and webcam, and decisions about what to discard from AI suggestions when they conflicted with what the logs were showing — that was manual.
 
 ---
 
-*Joshua Peter Polaprayil — AI/ML Engineer*  
-*May 2026*
+## What Would Come Next
+
+* **Frame-level timestamping.** The current pipeline assumes frames arrive at exactly `TARGET_FPS`. Attaching a monotonic timestamp to each frame and using it to build the FFT time axis would make frequency mapping accurate under variable camera frame rates without assuming uniform delivery.
+* **Stateful inference.** Each window is currently independent. A model that carries BVP signal history across windows would give more stable HRV estimates and a faster time to first reliable reading — the 20-second warmup is a direct consequence of the stateless window approach.
+* **Concurrency.** `ThreadPoolExecutor(max_workers=2)` is a single-server constraint. Proper multi-user deployment separates the FastAPI ingest layer from compute and pushes inference to a worker queue (Celery, RQ, or similar).
+* **Auto-exposure suppression.** `getUserMedia` constraints include `exposureMode: 'manual'` and `exposureTime` settings. Browser and hardware support is currently too inconsistent to rely on, but as webcam driver support improves this becomes the single highest-impact quality improvement available.
+
+*Joshua Peter Polaprayil — AI/ML Engineer May 2026*
