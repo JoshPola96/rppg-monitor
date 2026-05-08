@@ -181,20 +181,22 @@
   .video-overlay {
     position: absolute;
     inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     pointer-events: none;
+    overflow: hidden; /* Keep the pip inside the rounded corners */
   }
 
-  .face-frame {
-    width: 160px; height: 200px;
-    border: 2px dashed rgba(0,212,255,.45);
-    border-radius: 50%;
-    transition: border-color .4s;
+  #tracking-box {
+    position: absolute;
+    border: 2px solid rgba(0, 212, 255, 0.5);
+    border-radius: 8px;
+    pointer-events: none;
+    transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+    box-shadow: 0 0 15px rgba(0,0,0,0.4);
   }
-
-  .face-frame.active { border-color: var(--green); border-style: solid; }
+  
+  #tracking-box.locked { border-color: var(--green); background: rgba(16, 185, 129, 0.08); }
+  #tracking-box.noisy  { border-color: var(--amber); }
+  #tracking-box.poor   { border-color: var(--red); }
 
   /* ── Status Bar ── */
   .status-bar {
@@ -481,7 +483,7 @@
           <div class="video-wrap">
             <video id="live-video" autoplay playsinline muted></video>
             <div class="video-overlay">
-              <div class="face-frame" id="face-frame"></div>
+              <div id="tracking-box" class="hidden"></div>
             </div>
           </div>
 
@@ -692,7 +694,7 @@ let lastRawJSON = null;
 let intentionalClose = false;   // distinguishes user stop from unexpected disconnect
 
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/stream`;
-const WINDOW_FRAMES_HINT = 150;  // mirrors backend WINDOW_FRAMES — used for buffer progress display
+const WINDOW_FRAMES_HINT = 600;  // mirrors backend WINDOW_FRAMES — used for buffer progress display
 
 const DEBUG_MODE = true; 
 let frameCounter = 0;
@@ -847,15 +849,50 @@ function stopStream() {
   if (videoStream) videoStream.getTracks().forEach(t => t.stop());
   
   document.getElementById('live-video').srcObject = null;
-  document.getElementById('face-frame').classList.remove('active');
   document.getElementById('start-btn').classList.remove('hidden');
   document.getElementById('stop-btn').classList.add('hidden');
+  document.getElementById('tracking-box').classList.add('hidden');
   document.getElementById('status-text').textContent = 'Session stopped.';
   setDot('ws-dot', '');
   slog('warn', 'Session stopped.');
 }
 
 function handleStreamMsg(d) {
+  if (intentionalClose) return;
+  
+  // Project the bounding box onto the video
+  // This ensures the box tracks your face even when the signal turns red/amber.
+  if (d.box && d.box.length === 4) {
+      const video = document.getElementById('live-video');
+      const tBox = document.getElementById('tracking-box');
+      
+      const vidW = video.videoWidth;
+      const vidH = video.videoHeight;
+      
+      if (vidW && vidH) {
+          const vidRatio = vidW / vidH;
+          const boxRatio = video.offsetWidth / video.offsetHeight;
+          let actualW, actualH, offsetX = 0, offsetY = 0;
+
+          if (vidRatio > boxRatio) {
+              actualH = video.offsetHeight;
+              actualW = actualH * vidRatio;
+              offsetX = (video.offsetWidth - actualW) / 2;
+          } else {
+              actualW = video.offsetWidth;
+              actualH = actualW / vidRatio;
+              offsetY = (video.offsetHeight - actualH) / 2;
+          }
+          
+          const scale = actualW / vidW; 
+          
+          tBox.style.left = (d.box[0] * scale + offsetX) + 'px';
+          tBox.style.top = (d.box[1] * scale + offsetY) + 'px';
+          tBox.style.width = (d.box[2] * scale) + 'px';
+          tBox.style.height = (d.box[3] * scale) + 'px';
+          tBox.classList.remove('hidden');
+      }
+  }
   if (d.status === 'buffering') {
     const buffered = d.buffered || 0;
     const target   = d.target   || WINDOW_FRAMES_HINT;
@@ -871,13 +908,15 @@ document.getElementById('status-text').textContent =
     return;
   }
   if (d.status === 'low_signal') {
-    // If the backend is dropping frames, we alert the user specifically
+    // If the backend drops frames, alert the user specifically based on the reason
     if (d.reason === 'blurry') {
       document.getElementById('status-text').textContent = "Signal paused: Image is blurry. Stay still.";
     } else if (d.reason === 'motion') {
       document.getElementById('status-text').textContent = "Signal paused: Too much movement.";
+    } else if (d.reason === 'no_face') {
+      document.getElementById('status-text').textContent = "Signal paused: No face detected. Please face the camera.";
     } else {
-      document.getElementById('status-text').textContent = "Low signal: Check lighting and face windows.";
+      document.getElementById('status-text').textContent = "Low signal: Check lighting and framing.";
     }
     updateSQI(d.sqi || 0);
     return;
@@ -900,7 +939,6 @@ document.getElementById('status-text').textContent =
   updateSQI(d.sqi);
 
   setDot('ws-dot', 'ok');
-  document.getElementById('face-frame').classList.add('active');
   document.getElementById('status-text').textContent = `Live · SQI ${(d.sqi * 100).toFixed(0)}% · ${d.buffered_frames} frames buffered`;
 
   bpmHistory.push(d.bpm);
@@ -1108,22 +1146,20 @@ function setDot(id, cls) {
 function updateSQI(sqi) {
     const pct = Math.min(100, Math.round((sqi || 0) * 100));
     const fill = document.getElementById('sqi-fill');
-    const faceFrame = document.getElementById('face-frame'); // The UI Box
+    const trackingBox = document.getElementById('tracking-box'); 
     
     fill.style.width = pct + '%';
     
+    trackingBox.className = ''; // Reset classes
     if (pct >= 60) {
         fill.style.background = 'var(--green)';
-        faceFrame.style.borderColor = 'var(--green)'; // Signal Locked
-        faceFrame.style.borderStyle = 'solid';
+        trackingBox.classList.add('locked');
     } else if (pct >= 30) {
         fill.style.background = 'var(--amber)';
-        faceFrame.style.borderColor = 'var(--amber)'; // Noisy
-        faceFrame.style.borderStyle = 'dashed';
+        trackingBox.classList.add('noisy');
     } else {
         fill.style.background = 'var(--red)';
-        faceFrame.style.borderColor = 'var(--red)';   // Poor Signal
-        faceFrame.style.borderStyle = 'dotted';
+        trackingBox.classList.add('poor');
     }
     
     document.getElementById('sqi-pct').textContent = pct + '%';

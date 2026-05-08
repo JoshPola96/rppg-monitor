@@ -7,19 +7,20 @@
 #           torch==2.3.0+cu118 --index-url https://download.pytorch.org/whl/cu118
 
 # ── Core inference ──────────────────────────────────────────
-open-rppg>=0.1.0           # rPPG model (FacePhys.rlap + signal utilities)
+open-rppg                  # rPPG model (FacePhys.rlap + signal utilities)
 
 # ── API framework ───────────────────────────────────────────
-fastapi>=0.111.0
-uvicorn[standard]>=0.30.0  # includes websockets + httptools
-python-multipart>=0.0.9    # UploadFile support
+fastapi
+uvicorn[standard]          # includes websockets + httptools
+python-multipart           # UploadFile support
 
 # ── Video / media ───────────────────────────────────────────
-av>=12.0.0                 # PyAV — WebM fragment decoding (no FFmpeg subprocess)
-opencv-python-headless>=4.9.0  # headless: no GUI deps on server
+av                         # PyAV — WebM fragment decoding (no FFmpeg subprocess)
+opencv-python              # STANDARD version required for local webcam UI
 
 # ── Numerics ────────────────────────────────────────────────
-numpy>=1.26.0
+numpy
 
 # ── Utilities ───────────────────────────────────────────────
-python-dotenv>=1.0.0       # env var management
+python-dotenv
+setuptools<70.0.0
