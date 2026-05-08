@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: wise-ai-rppg
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000          # Render's standard port for web services
+    healthCheckPath: /health
+    autoDeploy: true

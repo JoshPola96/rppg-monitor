@@ -1,0 +1,25 @@
+# rPPG_bpm/requirements.txt
+
+# Wise AI rPPG Vitals Monitor — Python dependencies
+#
+# Install:  pip install -r requirements.txt
+# GPU note: if CUDA available, replace torch line with:
+#           torch==2.3.0+cu118 --index-url https://download.pytorch.org/whl/cu118
+
+# ── Core inference ──────────────────────────────────────────
+open-rppg>=0.1.0           # rPPG model (FacePhys.rlap + signal utilities)
+
+# ── API framework ───────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0  # includes websockets + httptools
+python-multipart>=0.0.9    # UploadFile support
+
+# ── Video / media ───────────────────────────────────────────
+av>=12.0.0                 # PyAV — WebM fragment decoding (no FFmpeg subprocess)
+opencv-python-headless>=4.9.0  # headless: no GUI deps on server
+
+# ── Numerics ────────────────────────────────────────────────
+numpy>=1.26.0
+
+# ── Utilities ───────────────────────────────────────────────
+python-dotenv>=1.0.0       # env var management

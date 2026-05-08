@@ -1,0 +1,1157 @@
+# rPPG_bpm/static/index.html
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Wise AI — rPPG Vitals Monitor</title>
+<style>
+  /* ── Reset & Base ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:         #0a0e1a;
+    --surface:    #111827;
+    --surface2:   #1a2235;
+    --border:     #1f2e4a;
+    --accent:     #00d4ff;
+    --accent2:    #7c3aed;
+    --green:      #10b981;
+    --amber:      #f59e0b;
+    --red:        #ef4444;
+    --text:       #e2e8f0;
+    --muted:      #64748b;
+    --card-r:     14px;
+    --font:       'Inter', system-ui, sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Layout ── */
+  .app { max-width: 1180px; margin: 0 auto; padding: 28px 20px 60px; }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 20px;
+  }
+
+  .logo {
+    width: 42px; height: 42px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; flex-shrink: 0;
+  }
+
+  header h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
+  header p  { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
+
+  .badge {
+    margin-left: auto;
+    background: rgba(0,212,255,.12);
+    border: 1px solid rgba(0,212,255,.3);
+    color: var(--accent);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: .06em;
+    padding: 4px 10px;
+    border-radius: 20px;
+    text-transform: uppercase;
+  }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex;
+    gap: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 5px;
+    margin-bottom: 24px;
+    width: fit-content;
+  }
+
+  .tab {
+    padding: 9px 22px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    transition: all .2s;
+  }
+
+  .tab.active {
+    background: var(--accent2);
+    color: #fff;
+  }
+
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ── Grid ── */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+
+  @media (max-width: 768px) {
+    .grid-2 { grid-template-columns: 1fr; }
+    .grid-3, .grid-4 { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  /* ── Card ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--card-r);
+    padding: 20px;
+  }
+
+  .card-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+
+  /* ── Metric Tile ── */
+  .metric {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .metric-label {
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--muted);
+  }
+
+  .metric-value {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    transition: color .3s;
+  }
+
+  .metric-value.highlight { color: var(--accent); }
+  .metric-value.good      { color: var(--green);  }
+  .metric-value.warn      { color: var(--amber);  }
+  .metric-value.danger    { color: var(--red);    }
+  .metric-unit { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
+
+  /* ── Video Panel ── */
+  .video-wrap {
+    position: relative;
+    background: #000;
+    border-radius: 12px;
+    overflow: hidden;
+    aspect-ratio: 4/3;
+  }
+
+  #live-video {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .video-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+
+  .face-frame {
+    width: 160px; height: 200px;
+    border: 2px dashed rgba(0,212,255,.45);
+    border-radius: 50%;
+    transition: border-color .4s;
+  }
+
+  .face-frame.active { border-color: var(--green); border-style: solid; }
+
+  /* ── Status Bar ── */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-top: 12px;
+    font-size: 0.8rem;
+  }
+
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+    transition: background .3s;
+  }
+  .dot.ok      { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.warn    { background: var(--amber); }
+  .dot.error   { background: var(--red);   }
+  .dot.pulse   { animation: pulse 1.2s infinite; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: .35; }
+  }
+
+  #status-text { flex: 1; color: var(--muted); }
+
+  /* ── SQI Bar ── */
+  .sqi-bar-wrap { margin-top: 10px; }
+  .sqi-bar-label {
+    display: flex; justify-content: space-between;
+    font-size: 0.72rem; color: var(--muted); margin-bottom: 5px;
+  }
+
+  .sqi-track {
+    height: 6px;
+    background: var(--surface2);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .sqi-fill {
+    height: 100%;
+    border-radius: 3px;
+    width: 0%;
+    transition: width .6s ease, background .4s;
+    background: var(--muted);
+  }
+
+  /* ── Buttons ── */
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 22px;
+    border-radius: 9px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: all .2s;
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent), #0090b8);
+    color: #000;
+  }
+
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-primary:disabled { opacity: .4; cursor: not-allowed; filter: none; }
+
+  .btn-danger {
+    background: rgba(239,68,68,.15);
+    border: 1px solid rgba(239,68,68,.4);
+    color: var(--red);
+  }
+
+  .btn-danger:hover { background: rgba(239,68,68,.25); }
+
+  .btn-secondary {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+
+  /* ── Upload Zone ── */
+  .upload-zone {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 40px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: all .2s;
+    background: var(--surface2);
+  }
+
+  .upload-zone:hover, .upload-zone.drag { border-color: var(--accent); background: rgba(0,212,255,.05); }
+  .upload-zone .icon { font-size: 2.4rem; margin-bottom: 12px; }
+  .upload-zone h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 6px; }
+  .upload-zone p  { font-size: 0.78rem; color: var(--muted); }
+
+  #file-input { display: none; }
+
+  /* ── Progress ── */
+  .progress-wrap {
+    height: 6px;
+    background: var(--surface2);
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 12px 0;
+  }
+
+  .progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    border-radius: 3px;
+    width: 0%;
+    transition: width .4s ease;
+  }
+
+  /* ── Chunk Timeline ── */
+  .timeline { margin-top: 20px; }
+  .timeline-title {
+    font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--muted); margin-bottom: 10px;
+  }
+
+  .chunk-row {
+    display: grid;
+    grid-template-columns: 60px 90px 90px 90px 90px 90px 1fr;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 6px;
+    font-size: 0.8rem;
+    align-items: center;
+    animation: fadeIn .3s ease;
+  }
+
+  .chunk-row.header { color: var(--muted); font-size: 0.68rem; font-weight: 600; text-transform: uppercase; }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+
+  .sqi-pill {
+    display: inline-flex; align-items: center;
+    padding: 2px 8px; border-radius: 20px; font-size: 0.7rem; font-weight: 700;
+  }
+
+  .sqi-pill.high { background: rgba(16,185,129,.15); color: var(--green); }
+  .sqi-pill.med  { background: rgba(245,158,11,.15);  color: var(--amber); }
+  .sqi-pill.low  { background: rgba(239,68,68,.15);   color: var(--red);   }
+
+  /* ── HRV Section ── */
+  .hrv-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
+
+  @media (max-width: 600px) { .hrv-grid { grid-template-columns: 1fr 1fr; } }
+
+  .hrv-tile {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+  }
+
+  .hrv-tile .label { font-size: 0.66rem; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+  .hrv-tile .val   { font-size: 1.25rem; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .hrv-tile .unit  { font-size: 0.68rem; color: var(--muted); }
+
+  /* ── BVP Sparkline ── */
+  .sparkline-wrap {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    margin-top: 16px;
+  }
+
+  .sparkline-label { font-size: 0.72rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .07em; margin-bottom: 10px; }
+
+  canvas#sparkline { width: 100%; height: 70px; }
+
+  /* ── Aggregate Result Card ── */
+  .result-card {
+    background: linear-gradient(135deg, rgba(0,212,255,.07), rgba(124,58,237,.07));
+    border: 1px solid rgba(0,212,255,.25);
+    border-radius: var(--card-r);
+    padding: 24px;
+    margin-top: 20px;
+    text-align: center;
+  }
+
+  .result-bpm {
+    font-size: 4.5rem;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .result-label { font-size: 0.75rem; color: var(--muted); margin-top: 6px; text-transform: uppercase; letter-spacing: .08em; }
+
+  .result-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 20px; }
+
+  @media (max-width: 600px) { .result-grid { grid-template-columns: 1fr 1fr; } }
+
+  .result-sub { text-align: left; }
+  .result-sub .val { font-size: 1.5rem; font-weight: 700; }
+  .result-sub .lbl { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+
+  /* ── Disclaimer ── */
+  .disclaimer {
+    font-size: 0.7rem;
+    color: var(--muted);
+    background: var(--surface2);
+    border-left: 3px solid var(--amber);
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-top: 24px;
+    line-height: 1.6;
+  }
+
+  /* ── Log console ── */
+  .log {
+    background: #080c14;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    font-size: 0.72rem;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    color: #94a3b8;
+    max-height: 160px;
+    overflow-y: auto;
+    margin-top: 14px;
+  }
+
+  .log-line { margin-bottom: 3px; }
+  .log-line.info  { color: var(--accent); }
+  .log-line.ok    { color: var(--green); }
+  .log-line.warn  { color: var(--amber); }
+  .log-line.error { color: var(--red);   }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Header ── -->
+  <header>
+    <div class="logo">💓</div>
+    <div>
+      <h1>Wise AI — rPPG Vitals Monitor</h1>
+      <p>Camera-based contactless heart rate &amp; HRV analysis · FacePhys.rlap model</p>
+    </div>
+    <span class="badge">Prototype v1.0</span>
+  </header>
+
+  <!-- ── Mode Tabs ── -->
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('live')">📷 Live Stream</button>
+    <button class="tab" onclick="switchTab('upload')">📁 File Upload</button>
+  </div>
+
+  <!-- ════════════════════════════════════════
+       PANEL A — LIVE STREAM
+  ════════════════════════════════════════ -->
+  <div id="panel-live" class="panel active">
+    <div class="grid-2" style="margin-bottom:18px">
+
+      <!-- Video + Controls -->
+      <div>
+        <div class="card" style="padding:14px">
+          <div class="card-title">Camera Feed</div>
+          <div class="video-wrap">
+            <video id="live-video" autoplay playsinline muted></video>
+            <div class="video-overlay">
+              <div class="face-frame" id="face-frame"></div>
+            </div>
+          </div>
+
+          <div class="status-bar">
+            <div class="dot" id="ws-dot"></div>
+            <span id="status-text">Waiting to start…</span>
+          </div>
+
+          <div class="sqi-bar-wrap">
+            <div class="sqi-bar-label">
+              <span>Signal Quality (SQI)</span>
+              <span id="sqi-pct">—</span>
+            </div>
+            <div class="sqi-track"><div class="sqi-fill" id="sqi-fill"></div></div>
+          </div>
+
+          <div class="btn-row">
+            <button class="btn btn-primary" id="start-btn" onclick="startStream()">▶ Start Session</button>
+            <button class="btn btn-danger hidden" id="stop-btn" onclick="stopStream()">■ Stop</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Metrics -->
+      <div>
+        <div class="card" style="margin-bottom:14px">
+          <div class="card-title">Vitals — Live</div>
+          <div class="grid-2">
+            <div class="metric">
+              <span class="metric-label">Heart Rate</span>
+              <span class="metric-value highlight" id="live-bpm">—</span>
+              <span class="metric-unit">BPM</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Resp. Rate</span>
+              <span class="metric-value" id="live-rr">—</span>
+              <span class="metric-unit">breaths/min</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">HRV Metrics</div>
+          <div class="hrv-grid">
+            <div class="hrv-tile">
+              <div class="label">IBI</div>
+              <div class="val" id="live-ibi">—</div>
+              <div class="unit">ms</div>
+            </div>
+            <div class="hrv-tile">
+              <div class="label">SDNN</div>
+              <div class="val" id="live-sdnn">—</div>
+              <div class="unit">ms</div>
+            </div>
+            <div class="hrv-tile">
+              <div class="label">RMSSD</div>
+              <div class="val" id="live-rmssd">—</div>
+              <div class="unit">ms</div>
+            </div>
+            <div class="hrv-tile">
+              <div class="label">pNN50</div>
+              <div class="val" id="live-pnn50">—</div>
+              <div class="unit">%</div>
+            </div>
+            <div class="hrv-tile">
+              <div class="label">LF/HF</div>
+              <div class="val" id="live-lfhf">—</div>
+              <div class="unit">ratio</div>
+            </div>
+            <div class="hrv-tile">
+              <div class="label">Raw BPM</div>
+              <div class="val" id="live-rawbpm">—</div>
+              <div class="unit">unsmoothed</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sparkline-wrap">
+          <div class="sparkline-label">BPM History</div>
+          <canvas id="sparkline"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Log -->
+    <div class="log" id="stream-log">
+      <div class="log-line">Wise AI rPPG stream ready. Click Start Session to begin.</div>
+    </div>
+  </div>
+
+
+  <!-- ════════════════════════════════════════
+       PANEL B — FILE UPLOAD
+  ════════════════════════════════════════ -->
+  <div id="panel-upload" class="panel">
+
+    <!-- Drop zone -->
+    <div class="upload-zone" id="drop-zone"
+         onclick="document.getElementById('file-input').click()"
+         ondragover="handleDrag(event, true)"
+         ondragleave="handleDrag(event, false)"
+         ondrop="handleDrop(event)">
+      <div class="icon">🎬</div>
+      <h3>Drop a face video or click to browse</h3>
+      <p>Supports mp4 · webm · mov · avi · mkv &nbsp;|&nbsp; min 10 s &nbsp;|&nbsp; 30 fps recommended</p>
+      <input type="file" id="file-input" accept=".mp4,.webm,.mov,.avi,.mkv" onchange="handleFile(event)" />
+    </div>
+
+    <div id="upload-status" class="status-bar hidden" style="margin-top:12px">
+      <div class="dot warn pulse" id="up-dot"></div>
+      <span id="up-status-text">Analysing…</span>
+    </div>
+
+    <div class="progress-wrap hidden" id="up-progress-wrap">
+      <div class="progress-bar" id="up-progress"></div>
+    </div>
+
+    <!-- Aggregate result -->
+    <div id="agg-result" class="hidden">
+
+      <div class="result-card">
+        <div class="result-label">60-Second Aggregate — SQI-Weighted</div>
+        <div class="result-bpm" id="agg-bpm">—</div>
+        <div class="result-label" style="font-size:.85rem; margin-top:8px">BPM</div>
+
+        <div class="result-grid">
+          <div class="result-sub">
+            <div class="lbl">Resp. Rate</div>
+            <div class="val" id="agg-rr">—</div>
+          </div>
+          <div class="result-sub">
+            <div class="lbl">Avg SQI</div>
+            <div class="val" id="agg-sqi">—</div>
+          </div>
+          <div class="result-sub">
+            <div class="lbl">BPM Std Dev</div>
+            <div class="val" id="agg-std">—</div>
+          </div>
+          <div class="result-sub">
+            <div class="lbl">HRV SDNN</div>
+            <div class="val" id="agg-sdnn">—</div>
+          </div>
+          <div class="result-sub">
+            <div class="lbl">HRV RMSSD</div>
+            <div class="val" id="agg-rmssd">—</div>
+          </div>
+          <div class="result-sub">
+            <div class="lbl">LF/HF Ratio</div>
+            <div class="val" id="agg-lfhf">—</div>
+          </div>
+        </div>
+
+        <p style="font-size:.72rem; color:var(--muted); margin-top:16px" id="agg-coverage"></p>
+      </div>
+
+      <!-- Chunk timeline -->
+      <div class="timeline">
+        <div class="timeline-title">5-Second Chunk Breakdown</div>
+        <div class="chunk-row header">
+          <span>Chunk</span>
+          <span>Time</span>
+          <span>BPM (FFT)</span>
+          <span>BPM (Peak)</span>
+          <span>Resp</span>
+          <span>SQI</span>
+          <span>ms</span>
+        </div>
+        <div id="chunk-list"></div>
+      </div>
+
+      <!-- HRV detail grid -->
+      <div class="card" style="margin-top:20px">
+        <div class="card-title">HRV — Chunk-Weighted Detail</div>
+        <div class="hrv-grid">
+          <div class="hrv-tile"><div class="label">SDNN</div><div class="val" id="d-sdnn">—</div><div class="unit">ms</div></div>
+          <div class="hrv-tile"><div class="label">RMSSD</div><div class="val" id="d-rmssd">—</div><div class="unit">ms</div></div>
+          <div class="hrv-tile"><div class="label">LF/HF</div><div class="val" id="d-lfhf">—</div><div class="unit">ratio</div></div>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="copyJSON()">📋 Copy Raw JSON</button>
+        <button class="btn btn-secondary" onclick="resetUpload()">↩ Analyse another</button>
+      </div>
+    </div>
+
+    <div class="log" id="upload-log" style="margin-top:14px">
+      <div class="log-line">Upload a video to begin analysis.</div>
+    </div>
+  </div>
+
+  <!-- Disclaimer -->
+  <div class="disclaimer">
+    ⚠️ <strong>Research prototype only.</strong> This tool is not a medical device and should not be used for clinical diagnosis or treatment. rPPG accuracy is affected by lighting, motion, skin tone, and camera quality. Always consult a qualified healthcare provider for medical concerns.
+  </div>
+
+</div><!-- .app -->
+
+<script>
+// ════════════════════════════════════════════════════════════
+// STATE
+// ════════════════════════════════════════════════════════════
+let ws = null;
+let recorder = null;
+let videoStream = null;
+let bpmHistory = [];
+let lastRawJSON = null;
+let intentionalClose = false;   // distinguishes user stop from unexpected disconnect
+
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/stream`;
+const WINDOW_FRAMES_HINT = 150;  // mirrors backend WINDOW_FRAMES — used for buffer progress display
+
+const DEBUG_MODE = true; 
+let frameCounter = 0;
+
+// ════════════════════════════════════════════════════════════
+// TABS
+// ════════════════════════════════════════════════════════════
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const names = ['live', 'upload'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.getElementById('panel-live').classList.toggle('active', name === 'live');
+  document.getElementById('panel-upload').classList.toggle('active', name === 'upload');
+}
+
+// ════════════════════════════════════════════════════════════
+// LIVE STREAM
+// ════════════════════════════════════════════════════════════
+
+let captureInterval = null;
+const hiddenCanvas = document.createElement('canvas');
+const hiddenCtx = hiddenCanvas.getContext('2d');
+
+async function startStream() {
+  const startBtn = document.getElementById('start-btn');
+  startBtn.disabled = true;
+
+  try {
+    videoStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, min: 25 } },
+      audio: false,
+    });
+  } catch (e) {
+    slog('error', `Camera error: ${e.message}`);
+    startBtn.disabled = false;
+    return;
+  }
+
+  const videoEl = document.getElementById('live-video');
+  videoEl.srcObject = videoStream;
+
+  // 1. Wait for the camera to warm up and yield dimensions
+  videoEl.onloadedmetadata = async () => {
+    try {
+      // 2. Explicitly play the video (fixes black/frozen frames)
+      await videoEl.play();
+    } catch (e) {
+      slog('error', `Video play error: ${e.message}`);
+      return;
+    }
+
+    // 3. Now it is safe to set up our canvas and UI
+    hiddenCanvas.width = videoEl.videoWidth;
+    hiddenCanvas.height = videoEl.videoHeight;
+    
+    startBtn.classList.add('hidden');
+    startBtn.disabled = false;
+    document.getElementById('stop-btn').classList.remove('hidden');
+    document.getElementById('status-text').textContent = 'Connecting…';
+
+    bpmHistory = [];
+    drawSparkline();
+    setDot('ws-dot', '');
+    intentionalClose = false;
+    slog('info', 'Camera started — opening WebSocket…');
+
+    // 4. Open WebSocket
+    ws = new WebSocket(WS_URL);
+    ws.binaryType = 'blob'; 
+
+    ws.onopen = () => {
+      setDot('ws-dot', 'ok pulse');
+      slog('ok', 'WebSocket connected — starting O(1) frame extraction…');
+      
+      // 5. Start capturing frames ONLY after WS is open and video is playing
+      const captureFrame = (now, metadata) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN || intentionalClose) return;
+
+          const tCapture = performance.now();
+          hiddenCtx.drawImage(videoEl, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+          
+          const frameData = hiddenCanvas.toDataURL('image/jpeg', 0.5);
+          
+          if (DEBUG_MODE && frameCounter % 30 === 0) { // Log once per second
+            console.log(`[Trace] Frame ${frameCounter} | JPEG Size: ${(frameData.length / 1024).toFixed(1)} KB | Encoded in: ${(performance.now() - tCapture).toFixed(1)}ms`);
+          }
+          frameCounter++;
+          ws.send(frameData);
+
+        // Queue the exact moment the next hardware frame is ready
+      if ('requestVideoFrameCallback' in videoEl) {
+        videoEl.requestVideoFrameCallback(captureFrame);
+      } else {
+        // Fallback for older browsers (runs at screen refresh rate, usually 60fps)
+        setTimeout(() => requestAnimationFrame(captureFrame), 33); 
+      }
+    };
+
+    // Kick off the hardware-synced loop
+    if ('requestVideoFrameCallback' in videoEl) {
+      videoEl.requestVideoFrameCallback(captureFrame);
+    } else {
+      requestAnimationFrame(captureFrame);
+    }
+  };
+
+    ws.onmessage = (ev) => {
+      if (DEBUG_MODE) {
+         console.log(`[Trace] Received WS Payload: ${ev.data.length} chars`, JSON.parse(ev.data));
+      }
+      const d = JSON.parse(ev.data);
+      handleStreamMsg(d);
+    };
+
+    ws.onerror = () => slog('error', 'WebSocket error');
+    ws.onclose = () => {
+      // Stop the 30fps loop immediately
+      if (captureInterval) clearInterval(captureInterval); 
+      
+      if (!intentionalClose) {
+        setDot('ws-dot', 'warn');
+        slog('warn', 'WebSocket closed unexpectedly');
+        // Clean up camera tracks and reset UI state
+        stopStream(); 
+      }
+    };
+  };
+}
+
+function startRecorder() {
+  let mime = 'video/webm;codecs=vp8';
+  if (!MediaRecorder.isTypeSupported(mime)) mime = 'video/webm';
+
+  recorder = new MediaRecorder(videoStream, { mimeType: mime });
+
+  recorder.ondataavailable = async (e) => {
+    if (e.data && e.data.size > 1000 && ws && ws.readyState === 1) {
+      const buf = await e.data.arrayBuffer();
+      ws.send(buf);
+    }
+  };
+
+  recorder.start(250);   // 250ms slices → continuous stream
+  slog('ok', `Streaming @ 250ms slices (${mime})`);
+}
+
+function stopStream() {
+  intentionalClose = true;
+  if (captureInterval) clearInterval(captureInterval);
+  if (ws) ws.close();
+  if (videoStream) videoStream.getTracks().forEach(t => t.stop());
+  
+  document.getElementById('live-video').srcObject = null;
+  document.getElementById('face-frame').classList.remove('active');
+  document.getElementById('start-btn').classList.remove('hidden');
+  document.getElementById('stop-btn').classList.add('hidden');
+  document.getElementById('status-text').textContent = 'Session stopped.';
+  setDot('ws-dot', '');
+  slog('warn', 'Session stopped.');
+}
+
+function handleStreamMsg(d) {
+  if (d.status === 'buffering') {
+    const buffered = d.buffered || 0;
+    const target   = d.target   || WINDOW_FRAMES_HINT;
+    const pct = Math.min(100, Math.round((buffered / target) * 100));
+document.getElementById('status-text').textContent = 
+      buffered < 150 ? `Warming sensor... (${pct}%)` : `Analyzing initial window... (${pct}%)`;
+    setDot('ws-dot', 'ok pulse');
+    // Neutral amber during buffer fill — not red (signal isn't bad, we're warming up)
+    const fill = document.getElementById('sqi-fill');
+    fill.style.width = pct + '%';
+    fill.style.background = 'var(--amber)';
+    document.getElementById('sqi-pct').textContent = 'warming…';
+    return;
+  }
+  if (d.status === 'low_signal') {
+    // If the backend is dropping frames, we alert the user specifically
+    if (d.reason === 'blurry') {
+      document.getElementById('status-text').textContent = "Signal paused: Image is blurry. Stay still.";
+    } else if (d.reason === 'motion') {
+      document.getElementById('status-text').textContent = "Signal paused: Too much movement.";
+    } else {
+      document.getElementById('status-text').textContent = "Low signal: Check lighting and face windows.";
+    }
+    updateSQI(d.sqi || 0);
+    return;
+  }
+  if (d.status === 'no_signal' || d.status === 'error') {
+    slog('error', `Signal error: ${d.detail || d.status}`);
+    return;
+  }
+  if (d.status !== 'ok') return;
+
+  // Update UI
+  setText('live-bpm',    d.bpm);
+  setText('live-rr',     d.rr);
+  setText('live-ibi',    d.hrv_ibi);
+  setText('live-sdnn',   d.hrv_sdnn);
+  setText('live-rmssd',  d.hrv_rmssd);
+  setText('live-pnn50',  d.hrv_pnn50);
+  setText('live-lfhf',   d.hrv_lf_hf);
+  setText('live-rawbpm', d.raw_bpm);
+  updateSQI(d.sqi);
+
+  setDot('ws-dot', 'ok');
+  document.getElementById('face-frame').classList.add('active');
+  document.getElementById('status-text').textContent = `Live · SQI ${(d.sqi * 100).toFixed(0)}% · ${d.buffered_frames} frames buffered`;
+
+  bpmHistory.push(d.bpm);
+  if (bpmHistory.length > 40) bpmHistory.shift();
+  drawSparkline();
+
+  slog('ok', `BPM ${d.bpm} | RR ${d.rr} | SDNN ${d.hrv_sdnn} | SQI ${(d.sqi * 100).toFixed(1)}%`);
+}
+
+// ════════════════════════════════════════════════════════════
+// FILE UPLOAD
+// ════════════════════════════════════════════════════════════
+function handleDrag(e, on) {
+  e.preventDefault();
+  document.getElementById('drop-zone').classList.toggle('drag', on);
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('drop-zone').classList.remove('drag');
+  const f = e.dataTransfer.files[0];
+  if (f) runAnalysis(f);
+}
+
+function handleFile(e) {
+  const f = e.target.files[0];
+  if (f) runAnalysis(f);
+}
+
+async function runAnalysis(file) {
+  ulog('info', `Uploading: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)…`);
+
+  document.getElementById('agg-result').classList.add('hidden');
+  document.getElementById('upload-status').classList.remove('hidden');
+  document.getElementById('up-progress-wrap').classList.remove('hidden');
+  
+  // 1. Uploading Phase
+  document.getElementById('up-dot').className = 'dot warn pulse';
+  document.getElementById('up-status-text').textContent = 'Uploading video file…';
+  animateProgress(0, 30, 1500); // Simulate upload progress to 30%
+
+  const form = new FormData();
+  form.append('file', file, file.name);
+
+  let resp;
+  try {
+    resp = await fetch('/analyze', { method: 'POST', body: form });
+  } catch (e) {
+    ulog('error', `Network error: ${e.message}`);
+    document.getElementById('up-dot').className = 'dot error';
+    document.getElementById('up-status-text').textContent = `Network error — ${e.message}`;
+    document.getElementById('up-progress-wrap').classList.add('hidden');
+    return;
+  }
+
+  // 2. The fetch request is hanging here while the server processes the video.
+  // We should ideally use Server-Sent Events (SSE) or WebSockets for real-time
+  // backend progress, but for now, we'll simulate the "Analyzing" phase visually.
+  document.getElementById('up-status-text').textContent = 'Analyzing frames (this may take a moment)…';
+  document.getElementById('up-dot').className = 'dot ok pulse';
+  animateProgress(30, 90, 5000); // Simulate analysis progress to 90%
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Unknown error' }));
+    ulog('error', `Server error ${resp.status}: ${err.detail}`);
+    document.getElementById('up-dot').className = 'dot error';
+    document.getElementById('up-status-text').textContent = `Error: ${err.detail}`;
+    document.getElementById('up-progress').style.width = '100%'; // Stop the bar
+    document.getElementById('up-progress').style.background = 'var(--red)'; // Turn red
+    return;
+  }
+
+  // 3. Completion Phase
+  const data = await resp.json();
+  lastRawJSON = data;
+  
+  document.getElementById('up-status-text').textContent = 'Rendering results…';
+  animateProgress(90, 100, 300); // Fast snap to 100%
+
+  setTimeout(() => {
+    document.getElementById('up-progress-wrap').classList.add('hidden');
+    document.getElementById('upload-status').classList.add('hidden');
+    // Reset progress bar styling for the next run
+    document.getElementById('up-progress').style.background = 'linear-gradient(90deg, var(--accent), var(--accent2))';
+    renderResults(data);
+  }, 400);
+}
+
+function renderResults(data) {
+  const agg = data.aggregate;
+
+  // Aggregate card
+  document.getElementById('agg-bpm').textContent    = agg.final_bpm || '—';
+  document.getElementById('agg-rr').textContent     = `${agg.final_rr} br/m`;
+  document.getElementById('agg-sqi').textContent    = agg.avg_sqi;
+  document.getElementById('agg-std').textContent    = `±${agg.bpm_std}`;
+  document.getElementById('agg-sdnn').textContent   = `${agg.agg_hrv_sdnn} ms`;
+  document.getElementById('agg-rmssd').textContent  = `${agg.agg_hrv_rmssd} ms`;
+  document.getElementById('agg-lfhf').textContent   = agg.agg_hrv_lf_hf;
+  document.getElementById('agg-coverage').textContent =
+    `${agg.chunks_valid} of ${agg.chunks_total} chunks passed SQI threshold · ${(agg.total_time_ms/1000).toFixed(1)}s processing time · ${agg.message}`;
+
+  // HRV detail
+  document.getElementById('d-sdnn').textContent  = agg.agg_hrv_sdnn;
+  document.getElementById('d-rmssd').textContent = agg.agg_hrv_rmssd;
+  document.getElementById('d-lfhf').textContent  = agg.agg_hrv_lf_hf;
+
+  // Chunk list
+  const list = document.getElementById('chunk-list');
+  list.innerHTML = '';
+  data.chunks.forEach(c => {
+    const sqiClass = c.sqi >= 0.5 ? 'high' : c.sqi >= 0.25 ? 'med' : 'low';
+    const row = document.createElement('div');
+    row.className = 'chunk-row';
+    row.innerHTML = `
+      <span>#${c.chunk_index + 1}</span>
+      <span>${c.time_start_s}–${c.time_end_s}s</span>
+      <span>${c.bpm_fft}</span>
+      <span>${c.bpm_peak || '—'}</span>
+      <span>${c.respiratory_rate}</span>
+      <span><span class="sqi-pill ${sqiClass}">${(c.sqi * 100).toFixed(0)}%</span></span>
+      <span>${c.processing_time_ms.toFixed(0)} ms</span>
+    `;
+    list.appendChild(row);
+    ulog(c.sqi >= 0.25 ? 'ok' : 'warn',
+      `Chunk ${c.chunk_index + 1}: ${c.bpm_fft} BPM | SQI ${(c.sqi*100).toFixed(0)}% | RR ${c.respiratory_rate}`);
+  });
+
+  document.getElementById('agg-result').classList.remove('hidden');
+  ulog('ok', `Done. Final BPM: ${agg.final_bpm} | SQI: ${agg.avg_sqi} | Total: ${(agg.total_time_ms/1000).toFixed(2)}s`);
+}
+
+function resetUpload() {
+  document.getElementById('agg-result').classList.add('hidden');
+  document.getElementById('upload-status').classList.add('hidden');
+  document.getElementById('up-progress-wrap').classList.add('hidden');
+  document.getElementById('up-progress').style.width = '0%';
+  document.getElementById('file-input').value = '';
+  lastRawJSON = null;
+}
+
+function copyJSON() {
+  if (!lastRawJSON) return;
+  navigator.clipboard.writeText(JSON.stringify(lastRawJSON, null, 2));
+  alert('JSON copied to clipboard.');
+}
+
+// ════════════════════════════════════════════════════════════
+// SPARKLINE CANVAS
+// ════════════════════════════════════════════════════════════
+function drawSparkline() {
+  const canvas = document.getElementById('sparkline');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  // Fix: parenthesise correctly, fallback if canvas not yet laid out
+  const cssW = canvas.offsetWidth || 300;
+  canvas.width  = cssW * dpr;
+  canvas.height = 70  * dpr;
+  ctx.scale(dpr, dpr);
+
+  const W = cssW, H = 70;
+  ctx.clearRect(0, 0, W, H);
+
+  if (bpmHistory.length < 2) return;
+
+  const min = Math.min(...bpmHistory) - 5;
+  const max = Math.max(...bpmHistory) + 5;
+  const xStep = W / (bpmHistory.length - 1);
+  const yScale = H / (max - min);
+
+  ctx.beginPath();
+  ctx.strokeStyle = 'rgba(0, 212, 255, 0.8)';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+
+  bpmHistory.forEach((v, i) => {
+    const x = i * xStep;
+    const y = H - (v - min) * yScale;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+
+  ctx.stroke();
+
+  // fill
+  ctx.lineTo((bpmHistory.length - 1) * xStep, H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0, 212, 255, 0.07)';
+  ctx.fill();
+}
+
+// ════════════════════════════════════════════════════════════
+// HELPERS
+// ════════════════════════════════════════════════════════════
+function setText(id, v) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = v ?? '—';
+}
+
+function setDot(id, cls) {
+  const el = document.getElementById(id);
+  if (el) el.className = `dot ${cls}`;
+}
+
+function updateSQI(sqi) {
+    const pct = Math.min(100, Math.round((sqi || 0) * 100));
+    const fill = document.getElementById('sqi-fill');
+    const faceFrame = document.getElementById('face-frame'); // The UI Box
+    
+    fill.style.width = pct + '%';
+    
+    if (pct >= 60) {
+        fill.style.background = 'var(--green)';
+        faceFrame.style.borderColor = 'var(--green)'; // Signal Locked
+        faceFrame.style.borderStyle = 'solid';
+    } else if (pct >= 30) {
+        fill.style.background = 'var(--amber)';
+        faceFrame.style.borderColor = 'var(--amber)'; // Noisy
+        faceFrame.style.borderStyle = 'dashed';
+    } else {
+        fill.style.background = 'var(--red)';
+        faceFrame.style.borderColor = 'var(--red)';   // Poor Signal
+        faceFrame.style.borderStyle = 'dotted';
+    }
+    
+    document.getElementById('sqi-pct').textContent = pct + '%';
+}
+
+function animateProgress(startPct, endPct, duration) {
+  const bar = document.getElementById('up-progress');
+  const start = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - start) / duration);
+    bar.style.width = (startPct + (endPct - startPct) * t) + '%';
+    if (t < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+function slog(type, msg) { appendLog('stream-log', type, msg); }
+function ulog(type, msg) { appendLog('upload-log', type, msg); }
+
+function appendLog(id, type, msg) {
+  const log = document.getElementById(id);
+  const d = document.createElement('div');
+  d.className = `log-line ${type}`;
+  const ts = new Date().toTimeString().slice(0, 8);
+  d.textContent = `[${ts}] ${msg}`;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+</script>
+</body>
+</html>
