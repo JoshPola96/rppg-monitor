@@ -17,10 +17,11 @@ python-multipart           # UploadFile support
 # ── Video / media ───────────────────────────────────────────
 av                         # PyAV — WebM fragment decoding (no FFmpeg subprocess)
 opencv-python-headless     # headless: no GUI deps on server
+mediapipe==0.10.14         # for face detection on server side
 
 # ── Numerics ────────────────────────────────────────────────
 numpy
 
 # ── Utilities ───────────────────────────────────────────────
 python-dotenv
-setuptools
+setuptools<70.0.0

@@ -19,6 +19,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
+import mediapipe as mp
 
 import cv2
 import numpy as np
@@ -46,7 +47,7 @@ logger = logging.getLogger("rppg")
 TARGET_FPS       = 30    # Webcam target frame rate
 WINDOW_FRAMES    = 600   # 20-second window (20 * 30fps) — much more stable FFT resolution
 STEP_FRAMES      = 36    # Inference every ~1.2s
-SQI_THRESHOLD    = 0.35  # Signal quality gate
+SQI_THRESHOLD    = 0.30  # Signal quality gate
 MIN_VALID_CHUNKS = 2     # Minimum chunks for a valid aggregate (file upload)
 EMA_ALPHA        = 0.70  # Higher alpha = faster response
 
@@ -60,10 +61,11 @@ BRIGHTNESS_MAX   = 220.0  # Mean pixel ceiling
 MOTION_THRESHOLD = 25.0   # Mean absolute diff between consecutive face grays
 
 # ─────────────────────────────────────────────────
-# Haar cascade — bundled with opencv-python-headless
+# Face detector — MediaPipe BlazeFace
 # ─────────────────────────────────────────────────
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+_mp_detector = mp.solutions.face_detection.FaceDetection(
+    model_selection=0,           # 0 = short-range (<2m), tuned for webcam distance
+    min_detection_confidence=0.5
 )
 
 # ─────────────────────────────────────────────────
@@ -175,35 +177,48 @@ class FrameQualityMonitor:
     """
     def __init__(self):
         self.prev_gray: np.ndarray | None = None
+        self._brightness_history: deque = deque(maxlen=15)  # ~18s at 1.2s step rate
+
+    def brightness_drift(self, brightness: float) -> bool:
+        """
+        True if face brightness has ranged >15 units over the last 15 readings.
+        Signature of webcam auto-exposure adjusting — indistinguishable from
+        blood volume pulse changes and the primary SQI destabiliser indoors.
+        Operates on face-crop brightness, not full-frame, to avoid false fires
+        from background lighting changes.
+        """
+        self._brightness_history.append(brightness)
+        if len(self._brightness_history) < 8:
+            return False
+        return (max(self._brightness_history) - min(self._brightness_history)) > 15.0
 
     def check(self, face_rgb: np.ndarray) -> tuple[bool, str, float]:
-        """Returns (is_valid, reason, brightness). Runs on the face crop only."""
+        """Motion → Brightness → Blur (cheapest first). Applied to face crop only."""
         gray = cv2.cvtColor(face_rgb, cv2.COLOR_RGB2GRAY)
 
-        brightness = float(np.mean(gray))
-        if not (BRIGHTNESS_MIN < brightness < BRIGHTNESS_MAX):
-            logger.debug(f"[QualityGate] REJECT lighting — brightness={brightness:.1f}")
-            return False, "lighting", brightness
-
-        blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        if blur_score < BLUR_THRESHOLD:
-            logger.debug(f"[QualityGate] REJECT blur — score={blur_score:.2f}")
-            return False, "blurry", brightness
-
+        # 1. Motion — absdiff, cheapest, most common rejection cause
         if self.prev_gray is not None:
             motion = float(np.mean(cv2.absdiff(self.prev_gray, gray)))
             if motion > MOTION_THRESHOLD:
-                self.prev_gray = gray
-                logger.debug(f"[QualityGate] REJECT motion — diff={motion:.2f}")
-                return False, "motion", brightness
+                self.prev_gray = gray   # update so we don't double-reject recovery frame
+                return False, "motion", float(np.mean(gray))
 
         self.prev_gray = gray
-        return True, "ok", brightness
 
+        # 2. Brightness — single mean pass
+        brightness = float(np.mean(gray))
+        if not (BRIGHTNESS_MIN < brightness < BRIGHTNESS_MAX):
+            return False, "lighting", brightness
+
+        # 3. Blur — Laplacian convolution, most expensive
+        if cv2.Laplacian(gray, cv2.CV_64F).var() < BLUR_THRESHOLD:
+            return False, "blurry", brightness
+
+        return True, "ok", brightness
 
 # Module-level singletons (single-user prototype — one stream at a time)
 quality_monitor     = FrameQualityMonitor()
-hr_smoothing_buffer = deque(maxlen=5)  # Median filter — kills single-window spikes
+hr_smoothing_buffer = deque(maxlen=7)  # Median filter — kills single-window spikes
 
 
 def make_serializable(obj):
@@ -226,42 +241,78 @@ def make_serializable(obj):
         return [make_serializable(i) for i in obj]
     return obj
 
+def _clamp_hrv(hrv: dict) -> dict:
+    """
+    Clamp heartpy HRV output to physiologically plausible ranges.
+    heartpy returns extreme outliers on marginal signal (IBI=8000ms, SDNN=800ms)
+    that pass the SQI gate but corrupt the weighted aggregate.
+    Ranges from literature: (40<bpm<150), (400<ibi<2000), (rmssd<100).
+    Values outside range are zeroed — parse_result already handles 0.0 gracefully.
+    """
+
+    def safe(key, lo, hi):
+        v = hrv.get(key)
+        if v is None: return 0.0
+        f = float(v)
+        return f if lo <= f <= hi else 0.0
+    
+    # 1. Extract raw Hz (e.g., 0.25 Hz)
+    raw_br_hz = float(hrv.get("breathingrate") or 0.0)
+    
+    # 2. Convert to Breaths Per Minute
+    br_bpm = raw_br_hz * 60.0
+    
+    # 3. heartpy search band: 0.1-0.4 Hz = 6-24 br/m (library ceiling)
+    raw_br_hz = float(hrv.get("breathingrate") or 0.0)
+    br_bpm = raw_br_hz * 60.0    
+    clamped_br = br_bpm if 4.0 <= br_bpm <= 24.0 else 0.0 # reduced to 4 to accomodate for shorter videos with less stable respiratory estimates
+
+    return {
+        "bpm":           safe("bpm",           40,   180),
+        "ibi":           safe("ibi",            400,  2000),
+        "sdnn":          safe("sdnn",           0,    200),
+        "rmssd":         safe("rmssd",          0,    150),
+        "pnn50":         safe("pnn50",          0,    100),
+        "LF/HF":         safe("LF/HF",          0,    15),
+        "breathingrate": clamped_br,
+    }
 
 def extract_face(
     frame_bgr: np.ndarray,
     last_box: tuple | None = None,
 ) -> tuple[np.ndarray | None, tuple | None]:
     """
-    Detects the largest frontal face with OpenCV Haar cascade, adds 10% padding,
-    crops, converts to RGB, resizes to FACE_SIZE x FACE_SIZE.
-
-    Falls back to last_box if detection misses a frame — maintains signal continuity
-    since a single missed crop would create a discontinuity in the BVP time series.
-
-    Returns (face_rgb, (x, y, w, h)) or (None, None).
+    BlazeFace detection → largest face → 10% pad crop → 128×128 RGB.
+    Falls back to last_box on miss (same contract as previous Haar version).
+    MediaPipe expects RGB input; returns relative bounding box coordinates.
     """
-    gray  = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)
-    )
+    h, w = frame_bgr.shape[:2]
+    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    res = _mp_detector.process(frame_rgb)
 
     box = None
-    if len(faces) > 0:
-        box = tuple(int(v) for v in max(faces, key=lambda r: r[2] * r[3]))
-        logger.debug(f"[FaceDetect] {len(faces)} face(s) found, using box {box}")
-    elif last_box is not None:
-        box = last_box
-        logger.debug("[FaceDetect] No detection, reusing last_box")
-
+    if res.detections:
+        best = max(res.detections, key=lambda d: d.score[0])
+        bb   = best.location_data.relative_bounding_box
+        x    = max(0, int(bb.xmin * w))
+        y    = max(0, int(bb.ymin * h))
+        bw   = int(bb.width  * w)
+        bh   = int(bb.height * h)
+        if bw > 0 and bh > 0:
+            box = (x, y, bw, bh)
+            logger.debug(f"[FaceDetect] BlazeFace score={best.score[0]:.2f} box={box}")
+    
     if box is None:
-        return None, None
+        if last_box is not None:
+            box = last_box
+            logger.debug("[FaceDetect] No detection, reusing last_box")
+        else:
+            return None, None
 
-    x, y, w, h = box
-    pad_x, pad_y = int(w * 0.10), int(h * 0.10)
-    x1 = max(0, x - pad_x)
-    y1 = max(0, y - pad_y)
-    x2 = min(frame_bgr.shape[1], x + w + pad_x)
-    y2 = min(frame_bgr.shape[0], y + h + pad_y)
+    x, y, bw, bh = box
+    pad_x, pad_y = int(bw * 0.10), int(bh * 0.10)
+    x1 = max(0, x - pad_x);    y1 = max(0, y - pad_y)
+    x2 = min(w, x + bw + pad_x); y2 = min(h, y + bh + pad_y)
 
     crop = frame_bgr[y1:y2, x1:x2]
     if crop.size == 0:
@@ -269,7 +320,7 @@ def extract_face(
 
     face_rgb     = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
     face_resized = cv2.resize(face_rgb, (FACE_SIZE, FACE_SIZE))
-    return face_resized, box
+    return face_resized, (x, y, bw, bh)
 
 
 def run_model(tensor: np.ndarray, fps: float) -> dict:
@@ -294,15 +345,12 @@ def run_model(tensor: np.ndarray, fps: float) -> dict:
         with model_lock:
             result = cv_model.process_faces_tensor(tensor, fps=fps)
             if result:
-                sqi = result.get("SQI") or 0.0
-                hr  = result.get("hr")
-                hrv = result.get("hrv") or {}
+                result["hrv"] = _clamp_hrv(result.get("hrv") or {})
                 logger.debug(
-                    f"[Model] SQI={float(sqi):.3f} | HR={hr} | "
-                    f"HRV keys: {list(hrv.keys())}"
+                    f"[Model] SQI={float(result.get('SQI') or 0):.3f} | "
+                    f"HR={result.get('hr')} | HRV keys: {list(result['hrv'].keys())}"
                 )
-            return result
-
+            return result        
 
 def parse_result(
     result: dict,
@@ -435,8 +483,10 @@ def process_video_file_sync(path: str) -> tuple[list[ChunkMetrics], float]:
     )
 
     chunk_results: list[ChunkMetrics] = []
-    current_chunk: list[np.ndarray]   = []
-    chunk_index  = 0
+    chunk_buffer  = deque(maxlen=win_frames)   
+    frames_since_infer = 0
+    chunk_index   = 0
+    CHUNK_STRIDE  = win_frames // 2            # 50% overlap — 300 frames = 10s stride
     last_box     = None
     total_frames = 0
     dropped      = 0
@@ -457,13 +507,13 @@ def process_video_file_sync(path: str) -> tuple[list[ChunkMetrics], float]:
                 logger.debug(f"[FileProcess] Frame {total_frames}: no face, skipping")
                 continue
 
-            current_chunk.append(face_rgb)
+            chunk_buffer.append(face_rgb)
+            frames_since_infer += 1
 
-            if len(current_chunk) == win_frames:
-                tensor    = np.stack(current_chunk).astype(np.uint8)
-                t_start_s = chunk_index * (win_frames / fps)
+            if len(chunk_buffer) == win_frames and frames_since_infer >= CHUNK_STRIDE:
+                tensor    = np.stack(chunk_buffer).astype(np.uint8)
+                t_start_s = (chunk_index * CHUNK_STRIDE) / fps
                 t0        = time.time()
-
                 try:
                     result     = run_model(tensor, fps)
                     elapsed_ms = (time.time() - t0) * 1000
@@ -473,9 +523,8 @@ def process_video_file_sync(path: str) -> tuple[list[ChunkMetrics], float]:
                         )
                 except Exception as e:
                     logger.warning(f"[FileProcess] Chunk {chunk_index} failed: {e}")
-
-                del tensor           # Release immediately — key for OOM prevention
-                current_chunk.clear()
+                del tensor
+                frames_since_infer = 0
                 chunk_index += 1
 
     finally:
@@ -587,7 +636,7 @@ async def stream_endpoint(ws: WebSocket):
 
     Frame flow per received message:
       1. Decode base64 JPEG → cv2.imdecode (thread pool)
-      2. Haar cascade → largest face → 128x128 RGB crop
+      2. BlazeFace (MediaPipe) → largest face → 128x128 RGB crop
       3. FrameQualityMonitor gate (blur, brightness, motion — on face crop)
       4. Append to deque(maxlen=WINDOW_FRAMES) — oldest frame auto-discarded
       5. Every STEP_FRAMES: np.stack → process_faces_tensor
@@ -633,7 +682,8 @@ async def stream_endpoint(ws: WebSocket):
                 continue
 
             # ── 2. Quality gate (on face crop only) ──────────────────────────
-            is_valid, reason, _ = quality_monitor.check(face_rgb)
+            is_valid, reason, brightness = quality_monitor.check(face_rgb)
+            exposure_drifting = quality_monitor.brightness_drift(brightness)   # ← use brightness, not captured_brightness
             if not is_valid:
                 await ws.send_json({
                     "status": "low_signal", "reason": reason, "sqi": 0.0
@@ -669,8 +719,9 @@ async def stream_endpoint(ws: WebSocket):
                 captured_brightness = brightness 
                 captured_buffered_len = len(frame_buffer)
                 captured_box = last_box
+                captured_drift        = exposure_drifting    
                 
-                async def infer_and_send(tensor, bright, buf_len, box):
+                async def infer_and_send(tensor, bright, buf_len, box, drift): 
                     try:
                         t0 = time.time()
                         
@@ -693,8 +744,17 @@ async def stream_endpoint(ws: WebSocket):
 
                         # Median HR smoothing
                         if sqi > SQI_THRESHOLD and raw_hr is not None:
-                            hr_smoothing_buffer.append(float(raw_hr))
-                            hr_num = float(np.median(hr_smoothing_buffer))
+                            new_hr = float(raw_hr)
+                            _prev  = list(hr_smoothing_buffer)
+                            prev_median = float(np.median(_prev)) if _prev else None
+
+                            # Consistency gate — reject if >15 BPM jump from last stable median
+                            if prev_median is not None and abs(new_hr - prev_median) > 15.0:
+                                logger.debug(f"[Stream] HR spike rejected: {new_hr:.1f} vs {prev_median:.1f} BPM")
+                                hr_num = prev_median   # hold last stable value, don't pollute buffer
+                            else:
+                                hr_smoothing_buffer.append(new_hr)
+                                hr_num = float(np.median(hr_smoothing_buffer))
                         else:
                             hr_num = float(hr_smoothing_buffer[-1]) if hr_smoothing_buffer else 0.0
 
@@ -726,6 +786,8 @@ async def stream_endpoint(ws: WebSocket):
                             "buffered_frames": buf_len,
                             "box":             box,                                  
                         }
+                        if drift:
+                            payload["warning"] = "exposure_drift"
                         await ws.send_json(make_serializable(payload))
 
                     except RuntimeError as e:
@@ -739,7 +801,9 @@ async def stream_endpoint(ws: WebSocket):
                     except Exception as e:
                         logger.error(f"[Stream] Async inference error: {e}")
 
-                inference_task = asyncio.create_task(infer_and_send(current_tensor, captured_brightness, captured_buffered_len, captured_box))
+                inference_task = asyncio.create_task(
+                    infer_and_send(current_tensor, captured_brightness, captured_buffered_len, captured_box, captured_drift)
+                )
             
             else:
                 logger.debug("[Stream] Inference lagging, skipping UI update cycle.")
