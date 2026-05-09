@@ -21,7 +21,9 @@ Usage:
 import argparse
 import logging
 import time
+from collections import deque as _deque 
 import sys
+import numpy as np
 
 import cv2
 import rppg
@@ -40,10 +42,10 @@ logging.getLogger("rppg").setLevel(logging.INFO)
 # ─────────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────────
-WARMUP_TIME      = 10     # seconds before accepting readings (camera needs to stabilise)
+WARMUP_TIME      = 20     # seconds before accepting readings (camera needs to stabilise)
 WINDOW_SIZE      = 20     # seconds of recent signal to pass to model.hr()
 UPDATE_INTERVAL  = 1.2    # seconds between HR/HRV extraction calls
-SQI_THRESHOLD    = 0.35   # lower than web because native pipeline pre-cleans signal
+SQI_THRESHOLD    = 0.30   # lower than web because native pipeline pre-cleans signal
 EMA_ALPHA        = 0.70   # higher alpha = faster response (native signal is cleaner)
 
 
@@ -130,6 +132,12 @@ def run_native_webcam(model_path: str):
     stable_hr  = 0.0
     start_time = time.time()
     last_update = 0.0
+    sqi_ema: float = 0.0
+    SQI_DISPLAY_ALPHA = 0.25
+    brightness_history: _deque = _deque(maxlen=15)
+    exposure_warn_shown = False
+    frame_count = 0
+    fps_check_start = time.time()
 
     # For final summary
     history = []
@@ -152,12 +160,40 @@ def run_native_webcam(model_path: str):
                 frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 now       = time.time()
                 elapsed   = now - start_time
+                frame_count += 1
+
+                # Auto-exposure drift detection — face crop only
+                if box is not None:
+                    y1, y2 = box[0]; x1, x2 = box[1]
+                    face_crop  = frame[y1:y2, x1:x2]   # frame is already RGB
+                    face_gray  = cv2.cvtColor(face_crop, cv2.COLOR_RGB2GRAY)
+                    face_brightness = float(np.mean(face_gray))
+                    brightness_history.append(face_brightness)
+
+                    if len(brightness_history) >= 8:
+                        drift = max(brightness_history) - min(brightness_history)
+                        if drift > 15.0 and not exposure_warn_shown:
+                            print("\n⚠  Auto-exposure drifting — face brightness range "
+                                f"{drift:.0f} units. Face a stable light source.")
+                            exposure_warn_shown = True
+                        elif drift <= 15.0:
+                            exposure_warn_shown = False
 
                 # ── Extract metrics on interval ───────────────────────────────
                 if now - last_update > UPDATE_INTERVAL:
+                    measured_fps = frame_count / (now - fps_check_start)
+                    frame_count = 0; fps_check_start = now
+                    if measured_fps < 22:
+                        logger.warning(f"[FPS] Camera delivering {measured_fps:.1f} fps — below 25fps threshold")
                     if elapsed < WARMUP_TIME:
-                        logger.info(f"[Warmup] {elapsed:.1f}s / {WARMUP_TIME}s")
+                        pct = int((elapsed / WARMUP_TIME) * 100)
+                        bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+                        sys.stdout.write(f"\r[Warmup] [{bar}] {pct}% — stabilising signal buffer…")
+                        sys.stdout.flush()
                         last_update = now
+                        frame_count = 0
+                        fps_check_start = now
+                        continue                          # skip inference until buffer is full
                     else:
                         result      = model.hr(start=-WINDOW_SIZE)
                         last_update = now
@@ -168,21 +204,31 @@ def run_native_webcam(model_path: str):
                             hrv = result.get("hrv") or {}
 
                             if sqi > SQI_THRESHOLD and hr is not None:
-                                stable_hr = (
-                                    float(hr)
-                                    if stable_hr == 0.0
-                                    else EMA_ALPHA * float(hr) + (1 - EMA_ALPHA) * stable_hr
-                                )
-                                val_hr    = stable_hr
-                                val_sqi   = float(sqi)
-                                val_rr    = float(hrv.get("breathingrate") or 0.0)
-                                val_ibi   = float(hrv.get("ibi") or 0.0)
-                                val_sdnn  = float(hrv.get("sdnn") or 0.0)
-                                val_rmssd = float(hrv.get("rmssd") or 0.0)
-                                val_pnn50 = float(hrv.get("pnn50") or 0.0)
-                                val_lf_hf = float(hrv.get("LF/HF") or 0.0)
-
-                                history.append(val_hr)
+                                new_hr = float(hr)
+                                # Consistency gate — >15 BPM change in 1.2s is physiologically impossible
+                                if stable_hr > 0.0 and abs(new_hr - stable_hr) > 15.0:
+                                    logger.debug(f"[REJECT] HR spike: {new_hr:.1f} vs {stable_hr:.1f}")
+                                else:
+                                    stable_hr = (
+                                        new_hr if stable_hr == 0.0
+                                        else EMA_ALPHA * new_hr + (1 - EMA_ALPHA) * stable_hr
+                                    )
+                                    sqi_ema = (
+                                        float(sqi) if sqi_ema == 0.0
+                                        else SQI_DISPLAY_ALPHA * float(sqi) + (1 - SQI_DISPLAY_ALPHA) * sqi_ema
+                                    )
+                                    val_hr    = stable_hr
+                                    val_sqi   = sqi_ema
+                                    # Convert Hz to br/m and clamp (4-40)
+                                    raw_br_hz = float(hrv.get("breathingrate") or 0.0)
+                                    br_bpm = raw_br_hz * 60.0
+                                    val_rr    = br_bpm if 6.0 <= br_bpm <= 24.0 else 0.0
+                                    val_ibi   = float(hrv.get("ibi")           or 0.0)
+                                    val_sdnn  = float(hrv.get("sdnn")          or 0.0)
+                                    val_rmssd = float(hrv.get("rmssd")         or 0.0)
+                                    val_pnn50 = float(hrv.get("pnn50")         or 0.0)
+                                    val_lf_hf = float(hrv.get("LF/HF")         or 0.0)
+                                    history.append(val_hr)
                             else:
                                 logger.info(f"[REJECT] SQI={float(sqi):.2f} HR={hr}")
 
@@ -241,6 +287,11 @@ def run_native_webcam(model_path: str):
         print("   FINAL SESSION SUMMARY")
         print("=" * 60)
         print(f"   Averaged HR  : {avg_hr:.1f} BPM")
+        print(f"   Last SQI     : {val_sqi * 100:.1f}%")
+        print(f"   Last RR      : {_fmt(val_rr)} br/m")
+        print(f"   Last SDNN    : {_fmt(val_sdnn)} ms")
+        print(f"   Last RMSSD   : {_fmt(val_rmssd)} ms")
+        print(f"   Last LF/HF   : {_fmt(val_lf_hf, 4)}")
         print(f"   Total Time   : {time.time() - start_time:.1f} s")
         print(f"   Readings     : {len(history)}")
         print(f"   Status       : Clean Shutdown")
@@ -282,6 +333,12 @@ def run_native_file(model_path: str, file_path: str):
     hr  = result.get("hr")
     hrv = result.get("hrv") or {}
 
+    # Convert Hz to br/m and clamp (4-40)
+    raw_br_hz = float(hrv.get("breathingrate") or 0.0)
+    br_bpm = raw_br_hz * 60.0
+    hrv["breathingrate"] = br_bpm if 4.0 <= br_bpm <= 40.0 else 0.0
+    result["hrv"] = hrv  # Reassign so _print_result_block gets the updated value
+
     logger.info(
         f"[Result] HR={_fmt(hr)} | SQI={_fmt(float(sqi) * 100, 2)}% | "
         f"RR={_fmt(hrv.get('breathingrate'))} | SDNN={_fmt(hrv.get('sdnn'))} | "
@@ -291,11 +348,11 @@ def run_native_file(model_path: str, file_path: str):
 
     _print_result_block(result, elapsed_s)
 
-    if sqi > 0.35 and hr is not None:
+    if sqi > SQI_THRESHOLD and hr is not None:
         logger.info(f"[Stable HR] {float(hr):.1f} BPM (SQI gate passed)")
     else:
         logger.warning(
-            f"[Stable HR] Rejected — SQI={float(sqi):.3f} below threshold 0.35 "
+            f"[Stable HR] Rejected — SQI={float(sqi):.3f} below threshold {SQI_THRESHOLD} "
             "or HR is None. Improve lighting and keep face centred."
         )
 

@@ -492,6 +492,13 @@
             <span id="status-text">Waiting to start…</span>
           </div>
 
+          <div id="exposure-warn" class="hidden" style="
+            margin-top:8px; padding:8px 12px; border-radius:8px;
+            background:rgba(245,158,11,.12); border:1px solid rgba(245,158,11,.35);
+            font-size:0.76rem; color:var(--amber);">
+            ⚠ Webcam auto-exposure unstable — face a window or fixed lamp for stable SQI
+          </div>
+
           <div class="sqi-bar-wrap">
             <div class="sqi-bar-label">
               <span>Signal Quality (SQI)</span>
@@ -518,9 +525,9 @@
               <span class="metric-unit">BPM</span>
             </div>
             <div class="metric">
-              <span class="metric-label">Resp. Rate</span>
+              <span class="metric-label">Resp. Rate <span style="font-size:0.6rem;color:var(--muted);font-weight:400">est.</span></span>
               <span class="metric-value" id="live-rr">—</span>
-              <span class="metric-unit">breaths/min</span>
+              <span class="metric-unit">br/min · RSA-derived, indicative only</span>
             </div>
           </div>
         </div>
@@ -611,7 +618,7 @@
 
         <div class="result-grid">
           <div class="result-sub">
-            <div class="lbl">Resp. Rate</div>
+            <div class="lbl">Resp. Rate <span style="font-size:0.6rem;opacity:.6">est.</span></div>
             <div class="val" id="agg-rr">—</div>
           </div>
           <div class="result-sub">
@@ -692,12 +699,16 @@ let videoStream = null;
 let bpmHistory = [];
 let lastRawJSON = null;
 let intentionalClose = false;   // distinguishes user stop from unexpected disconnect
+let _frameTimestamps = [];
 
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/stream`;
 const WINDOW_FRAMES_HINT = 600;  // mirrors backend WINDOW_FRAMES — used for buffer progress display
 
 const DEBUG_MODE = true; 
 let frameCounter = 0;
+
+let sqiEma = null;
+const SQI_DISPLAY_ALPHA = 0.25;  // slow EMA — display only, no inference impact
 
 // ════════════════════════════════════════════════════════════
 // TABS
@@ -777,13 +788,23 @@ async function startStream() {
           const tCapture = performance.now();
           hiddenCtx.drawImage(videoEl, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
           
-          const frameData = hiddenCanvas.toDataURL('image/jpeg', 0.5);
+          const frameData = hiddenCanvas.toDataURL('image/jpeg', 0.85);
           
           if (DEBUG_MODE && frameCounter % 30 === 0) { // Log once per second
             console.log(`[Trace] Frame ${frameCounter} | JPEG Size: ${(frameData.length / 1024).toFixed(1)} KB | Encoded in: ${(performance.now() - tCapture).toFixed(1)}ms`);
           }
           frameCounter++;
           ws.send(frameData);
+          const currentTime = performance.now();
+          _frameTimestamps.push(currentTime);
+          _frameTimestamps = _frameTimestamps.filter(t => currentTime - t < 3000); // last 3s
+
+          if (_frameTimestamps.length > 5 && frameCounter % 30 === 0) {
+              const measuredFPS = (_frameTimestamps.length / 3).toFixed(1);
+              if (parseFloat(measuredFPS) < 22) {
+                  slog('warn', `⚠ Low capture rate: ${measuredFPS} fps — FFT accuracy affected`);
+              }
+          }
 
         // Queue the exact moment the next hardware frame is ready
       if ('requestVideoFrameCallback' in videoEl) {
@@ -848,13 +869,32 @@ function stopStream() {
   if (ws) ws.close();
   if (videoStream) videoStream.getTracks().forEach(t => t.stop());
   
+  // ── 1. Reset Video & Overlay ──
   document.getElementById('live-video').srcObject = null;
   document.getElementById('start-btn').classList.remove('hidden');
   document.getElementById('stop-btn').classList.add('hidden');
   document.getElementById('tracking-box').classList.add('hidden');
+  document.getElementById('exposure-warn').classList.add('hidden');
+  
+  // ── 2. Reset Status & SQI ──
   document.getElementById('status-text').textContent = 'Session stopped.';
+  document.getElementById('sqi-pct').textContent = '—';
+  document.getElementById('sqi-fill').style.width = '0%';
   setDot('ws-dot', '');
-  slog('warn', 'Session stopped.');
+  
+  // ── 3. Reset Vitals & HRV Metrics ──
+  const idsToReset = [
+    'live-bpm', 'live-rr', 'live-ibi', 'live-sdnn', 
+    'live-rmssd', 'live-pnn50', 'live-lfhf', 'live-rawbpm'
+  ];
+  idsToReset.forEach(id => setText(id, '—'));
+
+  // ── 4. Clear State ──
+  sqiEma = null;
+  bpmHistory = [];
+  drawSparkline(); // Clears the canvas
+  
+  slog('warn', 'Session stopped. Vitals reset.');
 }
 
 function handleStreamMsg(d) {
@@ -924,6 +964,12 @@ document.getElementById('status-text').textContent =
   if (d.status === 'no_signal' || d.status === 'error') {
     slog('error', `Signal error: ${d.detail || d.status}`);
     return;
+  }
+  const warnEl = document.getElementById('exposure-warn');
+  if (d.warning === 'exposure_drift') {
+      warnEl.classList.remove('hidden');
+  } else {
+      warnEl.classList.add('hidden');
   }
   if (d.status !== 'ok') return;
 
@@ -1143,25 +1189,27 @@ function setDot(id, cls) {
   if (el) el.className = `dot ${cls}`;
 }
 
-function updateSQI(sqi) {
-    const pct = Math.min(100, Math.round((sqi || 0) * 100));
-    const fill = document.getElementById('sqi-fill');
-    const trackingBox = document.getElementById('tracking-box'); 
-    
+function updateSQI(rawSqi) {
+    const raw = rawSqi || 0;
+    sqiEma = (sqiEma === null) ? raw : (SQI_DISPLAY_ALPHA * raw + (1 - SQI_DISPLAY_ALPHA) * sqiEma);
+    const pct = Math.min(100, Math.round(sqiEma * 100));
+
+    const fill       = document.getElementById('sqi-fill');
+    const trackingBox = document.getElementById('tracking-box');
+
     fill.style.width = pct + '%';
-    
-    trackingBox.className = ''; // Reset classes
-    if (pct >= 60) {
+    trackingBox.className = '';
+
+    if (pct >= 55) {
         fill.style.background = 'var(--green)';
         trackingBox.classList.add('locked');
-    } else if (pct >= 30) {
+    } else if (pct >= 28) {
         fill.style.background = 'var(--amber)';
         trackingBox.classList.add('noisy');
     } else {
         fill.style.background = 'var(--red)';
         trackingBox.classList.add('poor');
     }
-    
     document.getElementById('sqi-pct').textContent = pct + '%';
 }
 
