@@ -1,6 +1,6 @@
 # rPPG Vitals Monitor
 
-> **Scope** · Personal project, actively maintained.
+> **Scope** · Personal project, built on my own time. Not actively maintained — it is finished, not tended.
 
 > [!WARNING]
 > **Not a medical device.** This is an engineering project exploring remote
