@@ -1,5 +1,7 @@
 # rPPG Vitals Monitor
 
+> **Scope** · Personal project, actively maintained.
+
 Camera-based contactless heart rate, respiratory rate, and HRV from a standard webcam — no wearables, no contact.
 
 *Note: Live cloud deployment on free tiers (like Render) is not recommended due to ML model RAM constraints. See local/Docker instructions below.*
