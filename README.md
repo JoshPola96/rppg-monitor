@@ -1,6 +1,6 @@
 # rPPG Vitals Monitor
 
-> **Scope** · Personal project, built on my own time. Not actively maintained — it is finished, not tended.
+> **Scope** · Timeboxed technical assessment, built to a brief over ~5 days against a research rPPG library from the company that develops the technology. Not maintained since.
 
 > [!WARNING]
 > **Not a medical device.** This is an engineering project exploring remote
