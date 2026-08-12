@@ -2,6 +2,13 @@
 
 > **Scope** · Personal project, actively maintained.
 
+> [!WARNING]
+> **Not a medical device.** This is an engineering project exploring remote
+> photoplethysmography. Its outputs are estimates from video, sensitive to lighting,
+> motion and skin tone, and are not validated against clinical reference standards.
+> Do not use it for diagnosis, monitoring a health condition, or any decision about
+> medical care. Consult a qualified clinician and use approved equipment.
+
 Camera-based contactless heart rate, respiratory rate, and HRV from a standard webcam — no wearables, no contact.
 
 *Note: Live cloud deployment on free tiers (like Render) is not recommended due to ML model RAM constraints. See local/Docker instructions below.*
