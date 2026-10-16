@@ -1,6 +1,6 @@
 # rPPG Vitals Monitor
 
-> **Scope** · Timeboxed technical assessment, built to a brief over ~5 days against a research rPPG library from the company that develops the technology. Not maintained since.
+> **Scope** · Timeboxed technical assessment, built to a ~5 day take-home brief on the research rPPG library of [wiseai.care](https://www.wiseai.care/), founded by MIT graduates, whose models this builds on and whose team deserves the credit for them. An independent implementation, not affiliated with or endorsed by them. Not maintained since.
 
 > [!WARNING]
 > **Not a medical device.** This is an engineering project exploring remote
